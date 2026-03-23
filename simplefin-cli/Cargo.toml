@@ -1,0 +1,19 @@
+[package]
+name = "simplefin-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for the SimpleFIN API bridge"
+repository = "https://github.com/csells/simplefin_rust"
+
+[[bin]]
+name = "simplefin"
+path = "src/main.rs"
+
+[dependencies]
+simplefin = { path = "../simplefin" }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", features = ["tls"] }
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde_json = "1"
+rust_decimal = "1"

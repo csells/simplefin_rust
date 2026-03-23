@@ -1,0 +1,22 @@
+[package]
+name = "simplefin"
+version = "0.1.0"
+edition = "2024"
+description = "Rust client library for the SimpleFIN API bridge"
+repository = "https://github.com/csells/simplefin_rust"
+
+[dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", features = ["tls", "tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+thiserror = "2"
+base64 = "0.22"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+indexmap = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tempfile = "3"
+rust_decimal_macros = "1"
