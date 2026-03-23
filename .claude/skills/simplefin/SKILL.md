@@ -21,87 +21,129 @@ questions about all of it.
 ## How it works
 
 The project at the workspace root has a CLI tool (`simplefin`) with these subcommands:
-1. **Collect** (`l`) — pulls account balances and transactions from the SimpleFIN API into local JSON storage, and records a balance snapshot for every account (deduped — skips if balance unchanged)
-2. **Add-balance** (`a`) — adds or updates a manual account balance (for accounts not connected to SimpleFIN)
-3. **Query** (`q`) — reads local storage and outputs filtered JSON with unified accounts (SimpleFIN + manual merged), transactions, and balance history
-4. **Summary** (`s`) — outputs categorized net worth (Cash, Investments, Other Assets, Credit Cards, Loans) with changes since last collection
+1. **Collect** (`l`) -- pulls account balances and transactions from the SimpleFIN API into local JSON storage, records balance snapshots, and persists any warnings/anomalies
+2. **Add-balance** (`a`) -- adds or updates a manual account balance (for accounts not connected to SimpleFIN)
+3. **Status** (`st`) -- quick snapshot of storage state: last collection time, account counts, stale accounts, warnings
+4. **Query** (`q`) -- reads local storage and outputs filtered JSON with unified accounts (SimpleFIN + manual merged), transactions, and balance history
+5. **Summary** (`s`) -- outputs categorized net worth (Cash, Investments, Other Assets, Credit Cards, Loans) with changes since last collection and optional history
+6. **Spending** (`p`) -- categorizes transactions into spending categories with totals
+7. **Stale** (`t`) -- lists manual accounts whose balances need updating
+8. **Configure** (`cfg`) -- view and modify account classifications, display names, and exclusions
+9. **Schema** -- outputs JSON Schema for any output type (for programmatic consumers)
+10. **Cleanup** -- finds and removes orphaned data files
 
 The CLI binary is built from this workspace. Build it if needed with `cargo build -p simplefin-cli`.
 
+## Output format
+
+All commands output a structured **envelope** by default:
+
+```json
+{
+  "data": { ... },
+  "warnings": ["WARNING: Account balance dropped to $0 (was 1234.56)", ...],
+  "errors": []
+}
+```
+
+- `data` contains the command-specific output
+- `warnings` are populated from persisted collection warnings (anomalies and bridge messages)
+- `errors` contains error messages on failure (with non-zero exit code)
+
+Use `--raw` to get bare JSON (no envelope) when you only need the data.
+
+Use `--format text` for human-readable table output instead of JSON.
+
 ## Storage location
 
-Data is stored **outside** the repo (this is a public repo — no financial data in git).
+Data is stored **outside** the repo (this is a public repo -- no financial data in git).
 The `SIMPLEFIN_DATA` environment variable must point to the storage directory. Set it
 in `.env` at the workspace root alongside `SIMPLEFIN_ACCESS_URL`.
 
 All `--storage` / `-s` flags below use `"$SIMPLEFIN_DATA"` as the path.
 
-## Step 1: Ensure data is fresh
+## Step 1: Check storage status
 
-Before answering any financial question, check if data exists and is reasonably recent:
+Before answering any financial question, check the current state:
 
 ```bash
-ls "$SIMPLEFIN_DATA/accounts.json" 2>/dev/null
+cargo run -p simplefin-cli -- status --storage "$SIMPLEFIN_DATA"
 ```
 
-If no data exists, or the user explicitly asks to refresh/collect/pull, run:
+This returns:
+- When the last collection happened (and how long ago)
+- Number of SimpleFIN and manual accounts
+- Which manual accounts have stale balances
+- Any warnings/anomalies from the most recent collection
+
+If `last_collection_time` is null or stale, or the user explicitly asks to refresh, run collect.
+
+## Step 2: Collect fresh data (if needed)
 
 ```bash
-cargo run -p simplefin-cli -- collect --storage "$SIMPLEFIN_DATA" --verbose 2>&1
+cargo run -p simplefin-cli -- collect --storage "$SIMPLEFIN_DATA" --verbose
 ```
 
 This requires `SIMPLEFIN_ACCESS_URL` to be set in `.env` at the workspace root.
-Collection is idempotent — safe to run multiple times. It fetches all accounts and
-transactions incrementally, and records a balance snapshot for every account on each run.
+Collection is idempotent -- safe to run multiple times. It fetches all accounts and
+transactions incrementally, records balance snapshots, and persists any warnings.
+
+Warnings and anomalies are now persisted and included in the envelope automatically.
+Check the `warnings` array in the response for:
+- Balance anomalies (dropped to zero, large changes, disappeared/new accounts)
+- Bridge messages (authentication issues, sync problems, date range caps)
+
+**Always report warnings prominently to the user.** Silent failures are unacceptable.
 
 If collection fails with a credentials error, tell the user they need to set up their
 `.env` file with `SIMPLEFIN_ACCESS_URL=<their access URL>`.
 
-### IMPORTANT: Surface all bridge messages
-
-The SimpleFIN bridge prints warnings and errors to stderr during collection. These
-are lines that start with `Bridge:` or `Bridge (account):`. **You MUST read every
-bridge message and report them clearly to the user.** These messages indicate real
-problems — authentication failures, date range caps, sync issues, or missing data.
-If you ignore them, the user will get incomplete or stale data without knowing it.
-
-After collection, always:
-1. Report any bridge messages prominently (not buried in a summary)
-2. Call out which accounts were affected
-3. Flag any accounts that returned 0 transactions — this may indicate a problem
-4. If an account shows a $0 balance or no data, tell the user explicitly
-
-The user depends on this data being accurate and complete. Silent failures are
-unacceptable — if something looks wrong, say so.
-
-## Step 2: Check for stale manual accounts
+## Step 3: Check for stale manual accounts
 
 Some accounts aren't connected through SimpleFIN and require manual balance entry.
-Each manual account has a `refresh_days` setting (e.g., daily for 401k/HSA, monthly
-for real estate/vehicles). Check which ones need updating:
+Each manual account has a `refresh_days` setting. Check which ones need updating:
 
 ```bash
 cargo run -p simplefin-cli -- stale --storage "$SIMPLEFIN_DATA"
 ```
 
-If any accounts are stale, the output is a JSON array with account details. Ask the
-user for current balances for each stale account, then update them:
+If any accounts are stale, ask the user for current balances, then update them:
 
 ```bash
-# Example: update a manual account balance
 cargo run -p simplefin-cli -- add-balance --storage "$SIMPLEFIN_DATA" \
   --name "My 401k" --org "My Provider" --balance 25000.00 --refresh-days 1
 ```
 
-If no accounts are stale, the output is: "All manual account balances are up to date."
+## Step 4: Query and analyze
 
-Each `add-balance` call records a timestamped balance snapshot. The `--refresh-days`
-flag controls how often the account is considered stale (default: 1 day).
-
-## Step 3: Query the data
+### Net worth summary
 
 ```bash
-# All data (includes manual accounts and balance history)
+# Category totals only
+cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA"
+
+# With per-account breakdown within each category
+cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA" --detail
+
+# With net worth history over last N collection timestamps
+cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA" --history 10
+
+# Combine detail and history
+cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA" --detail --history 10
+
+# Human-readable table format
+cargo run -p simplefin-cli -- --format text summary --storage "$SIMPLEFIN_DATA" --detail
+```
+
+The output includes:
+- `net_worth` -- categorized totals, total_assets, total_liabilities, net_worth
+- `changes` -- per-account balance deltas since the previous collection
+- `history` (when `--history N` is used) -- net worth at each of the last N collection timestamps
+
+### Raw data query
+
+```bash
+# All data
 cargo run -p simplefin-cli -- query --storage "$SIMPLEFIN_DATA"
 
 # Filter by organization
@@ -117,30 +159,7 @@ cargo run -p simplefin-cli -- query --storage "$SIMPLEFIN_DATA" --start-date 202
 cargo run -p simplefin-cli -- query --storage "$SIMPLEFIN_DATA" --pending
 ```
 
-### Step 3b: Get a net worth summary
-
-For net worth questions, use `summary` instead of `query` — it does the classification
-and math in Rust so you don't have to:
-
-```bash
-# Category totals only
-cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA"
-
-# With per-account breakdown within each category
-cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA" --detail
-```
-
-The output includes `net_worth` (categorized totals, total_assets, total_liabilities,
-net_worth) and `changes` (per-account balance deltas since the previous collection).
-With `--detail`, each category includes an `accounts` array with per-account name,
-org, and balance — sorted by absolute balance descending. Display names from config
-are used when available.
-
-This is the fastest way to answer "what's my net worth?" — just read the JSON output.
-
-### Step 3c: Spending analysis
-
-For spending questions, use the `spending` subcommand:
+### Spending analysis
 
 ```bash
 # All time
@@ -151,128 +170,104 @@ cargo run -p simplefin-cli -- spending --storage "$SIMPLEFIN_DATA" \
   --start-date 2024-01-01 --end-date 2024-02-01
 ```
 
-Output includes per-category totals (Restaurants, Groceries, Utilities, etc.),
-transaction counts, total spending, total income, and net.
-
-### Step 3d: Data cleanup
-
-To find orphaned data files (balance history or transactions for accounts that
-no longer exist):
+### Data cleanup
 
 ```bash
-# Dry run
+# Dry run -- show orphaned files
 cargo run -p simplefin-cli -- cleanup --storage "$SIMPLEFIN_DATA"
 
 # Remove orphaned files
 cargo run -p simplefin-cli -- cleanup --storage "$SIMPLEFIN_DATA" --remove
 ```
 
-### Query output format
+### JSON Schema for output types
 
-The query output is JSON with four top-level keys:
-
-```json
-{
-  "organizations": [...],      // Banks/institutions from SimpleFIN
-  "accounts": [...],           // Unified accounts (SimpleFIN + manual, each has "source" field)
-  "transactions": [...],       // Transactions with context
-  "balance_history": [...]     // Balance snapshots over time (all accounts)
-}
+```bash
+# Get schema for any output type
+cargo run -p simplefin-cli -- schema summary
+cargo run -p simplefin-cli -- schema status
+cargo run -p simplefin-cli -- schema query
+cargo run -p simplefin-cli -- schema spending
+cargo run -p simplefin-cli -- schema stale
+cargo run -p simplefin-cli -- schema warnings
+cargo run -p simplefin-cli -- schema history
+cargo run -p simplefin-cli -- schema changes
+cargo run -p simplefin-cli -- schema accounts
+cargo run -p simplefin-cli -- schema transactions
 ```
 
-### Account fields (unified)
-- `id` — unique account ID (SimpleFIN IDs or "manual-{org}-{name}" for manual)
-- `name` — account display name (e.g., "Joint Checking (3365)")
-- `org_name` — institution name (e.g., "Vanguard", "Chase")
-- `balance` — current balance as decimal string
-- `available_balance` — available balance (null for manual accounts)
-- `balance_date` — epoch timestamp of when balance was last updated (null if no history)
-- `currency` — currency code (may be empty for USD)
-- `source` — `"simplefin"` or `"manual"`
+## Step 5: Account configuration
 
-### Transaction fields
-- `id` — unique transaction ID
-- `account_id` — which account this belongs to
-- `account_name` — human-readable account name
-- `org_name` — institution name
-- `posted` — epoch timestamp
-- `amount` — decimal string (negative = debit, positive = credit)
-- `description` — transaction description/memo
-- `pending` — boolean
+Review and adjust how accounts are classified, named, and included:
 
-### Balance history fields
-- `account_id` — account this snapshot belongs to (SimpleFIN or manual)
-- `timestamp` — epoch timestamp when this balance was recorded
-- `balance` — balance at that point in time as decimal string
+```bash
+# List all accounts with their classifications and flags
+cargo run -p simplefin-cli -- configure --storage "$SIMPLEFIN_DATA" --list
 
-## Step 4: Analyze and answer
+# Human-readable format (flags low-confidence classifications with [? review])
+cargo run -p simplefin-cli -- --format text configure --storage "$SIMPLEFIN_DATA" --list
 
-Parse the JSON output and answer the user's question. Common analyses:
+# Set a display name
+cargo run -p simplefin-cli -- configure --storage "$SIMPLEFIN_DATA" \
+  --set "ACCOUNT-ID" --name "My Friendly Name"
 
-- **Net worth**: Use the `summary` subcommand — it returns categorized totals and grand total, computed in Rust. No manual arithmetic needed.
-- **Net worth by category**: Also in the `summary` output — categories are Cash, Investments, Other Assets, Credit Cards, Loans.
-- **Net worth trends**: Group `balance_history` by timestamp, sum all balances at each collection time to show total net worth over time.
-- **Changes since last collection**: The `summary` output includes a `changes` array showing per-account balance deltas.
-- **Net worth by account**: Use `summary --detail` — each category includes per-account breakdowns with display names from config.
-- **Spending**: Use the `spending` subcommand — it classifies transactions into categories and computes totals.
-- **Income**: Also in the `spending` output — `total_income` field.
-- **Account summary**: Use `query` — accounts are unified (SimpleFIN + manual in one list with `source` field)
-- **Transaction search**: Filter transactions by description, amount, date
-- **Trends**: Compare balances across time using `balance_history`
+# Override classification
+cargo run -p simplefin-cli -- configure --storage "$SIMPLEFIN_DATA" \
+  --set "ACCOUNT-ID" --category investments
 
-When presenting financial data:
-- Format currency amounts with commas and two decimal places (e.g., $1,234.56)
-- Convert epoch timestamps to human-readable dates
-- Group accounts by institution for readability
-- Negative amounts are debits/spending; positive amounts are credits/income
-- Include manual accounts in net worth calculations
-- If balances seem stale (balance-date is old), mention when they were last updated
+# Exclude from net worth
+cargo run -p simplefin-cli -- configure --storage "$SIMPLEFIN_DATA" \
+  --set "ACCOUNT-ID" --exclude
+
+# Re-include in net worth
+cargo run -p simplefin-cli -- configure --storage "$SIMPLEFIN_DATA" \
+  --set "ACCOUNT-ID" --include
+```
+
+The `--list` output shows for each account:
+- Heuristic classification (what the algorithm guessed)
+- Effective classification (after overrides/rules)
+- Whether it's overridden or excluded
+- A `confident` flag -- when false, the heuristic may be wrong and needs review
+
+Valid categories: `cash`, `investments`, `other_assets`, `credit_cards`, `loans`
 
 ## Account classification
 
-When presenting net worth or account summaries, accounts are grouped into five
-categories:
+Accounts are grouped into five categories:
 
 | Category | What goes here |
 |----------|---------------|
 | **Cash** | Checking and savings accounts |
 | **Investments** | Brokerage, IRA, 401(k), Roth IRA accounts |
 | **Other Assets** | Real estate, vehicles, HSA |
-| **Credit Cards** | Credit card accounts — balances are liabilities |
+| **Credit Cards** | Credit card accounts -- balances are liabilities |
 | **Loans** | Mortgage and other loans |
 
-### Classification rules
+Classification priority: account ID override > classification rules > heuristic classifier.
 
-The classification is done in Rust by `classify_account()`. The summary command handles
-this automatically. The rules are heuristic-based (checking account/org name keywords).
-If the automatic classification is wrong for a specific account, it can be overridden
-in `config.json` in the data directory via `classification_overrides` (maps account ID
-to category).
-
-### Per-user configuration
-
-User-specific settings live in `config.json` in the data directory (not in the repo).
-This file supports:
-
-- `excluded_account_patterns` — account names matching these patterns (case-insensitive)
-  are excluded from net worth and change calculations. Useful for authorized-user
-  duplicates, closed accounts, or test accounts.
-- `classification_overrides` — maps account IDs to specific categories, overriding the
-  heuristic classifier.
-- `classification_rules` — ordered list of pattern-matching rules (substring match on
-  account name or org name) checked before the heuristic classifier. First match wins.
-- `display_names` — maps account IDs to friendly display names used in `--detail` output.
-- `spending_rules` — custom rules for classifying transactions into spending categories.
-
-The `summary` command reads this config automatically. When accounts are misclassified
-or need to be excluded, update this file — don't hardcode fixes in the Rust source.
+After first collection, run `configure --list` with `--format text` to review classifications.
+Accounts flagged with `[? review]` have low-confidence heuristic matches and may need
+manual override via `configure --set`.
 
 ## Important notes
 
-- Financial amounts are precise decimals, not floats — trust them as-is
-- Balance history accumulates over time — each `collect` or `add-balance` adds a new snapshot
+- Financial amounts are precise decimals, not floats -- trust them as-is
+- Balance history accumulates over time -- each `collect` or `add-balance` adds a new snapshot
 - Some accounts (like brokerage) may not have transactions but will have balances
-- The `currency` field may be empty — assume USD in that case
+- The `currency` field may be empty -- assume USD in that case
 - Investment account balances reflect total portfolio value
-- Always collect fresh data before answering if the user asks about "current" or "latest" state
-- **Never suppress or ignore bridge messages** — they are the only way to know if data is incomplete
+- Always check `status` before answering -- if data is stale, collect first
+- Warnings in the envelope are automatically populated from persisted collection data
+- **Never suppress or ignore warnings** -- they are the only way to know if data is incomplete
+
+## Presenting financial data
+
+- Format currency amounts with commas and two decimal places (e.g., $1,234.56)
+- Convert epoch timestamps to human-readable dates
+- Group accounts by institution for readability
+- Negative amounts are debits/spending; positive amounts are credits/income
+- Include manual accounts in net worth calculations
+- If balances seem stale (balance-date is old), mention when they were last updated
+- Use `--format text` for the user when they want a quick overview
+- Use JSON (default) when you need to process or analyze the data programmatically

@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use super::traits::{
     AccountFilter, BalanceHistoryFilter, BalanceSnapshot, DataConfig, ManualAccount, OrgFilter,
     OrphanedData, OrphanedDataType, StaleAccount, Storage, TransactionFilter,
-    TransactionWithContext,
+    TransactionWithContext, WarningRecord,
 };
 
 /// JSON-file-based storage backend.
@@ -80,6 +80,10 @@ impl JsonStorage {
 
     fn config_path(&self) -> PathBuf {
         self.root.join("config.json")
+    }
+
+    fn warnings_path(&self) -> PathBuf {
+        self.root.join("warnings.json")
     }
 
     fn read_json<T: serde::de::DeserializeOwned + Default>(&self, path: &Path) -> Result<T> {
@@ -445,6 +449,27 @@ impl Storage for JsonStorage {
             }
         }
         Ok(())
+    }
+
+    fn save_warnings(&self, record: &WarningRecord) -> Result<()> {
+        self.write_json(&self.warnings_path(), record)
+    }
+
+    fn get_warnings(&self) -> Result<Option<WarningRecord>> {
+        let path = self.warnings_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read_to_string(&path).map_err(|e| SimplefinError::Storage {
+            message: format!("failed to read {}", path.display()),
+            source: Some(Box::new(e)),
+        })?;
+        let record: WarningRecord =
+            serde_json::from_str(&data).map_err(|e| SimplefinError::Storage {
+                message: format!("failed to parse {}", path.display()),
+                source: Some(Box::new(e)),
+            })?;
+        Ok(Some(record))
     }
 
     fn get_balance_history(&self, filter: &BalanceHistoryFilter) -> Result<Vec<BalanceSnapshot>> {

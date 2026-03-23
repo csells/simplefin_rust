@@ -4,7 +4,8 @@ use rust_decimal::Decimal;
 use simplefin::models::{Account, Organization, Transaction};
 use simplefin::storage::{
     AccountFilter, AccountSource, BalanceHistoryFilter, BalanceSnapshot, DataConfig, JsonStorage,
-    ManualAccount, OrgFilter, Storage, TransactionFilter, unify_accounts,
+    ManualAccount, OrgFilter, Storage, TransactionFilter, WarningRecord, compute_status,
+    unify_accounts,
 };
 
 fn test_org(id: &str, name: &str) -> Organization {
@@ -989,4 +990,108 @@ fn remove_orphaned_data_deletes_files() {
     // Should be clean now
     let orphans_after = storage.find_orphaned_data().unwrap();
     assert!(orphans_after.is_empty());
+}
+
+// === Warnings ===
+
+#[test]
+fn warnings_none_on_fresh_storage() {
+    let (_dir, storage) = open_temp_storage();
+    let warnings = storage.get_warnings().unwrap();
+    assert!(warnings.is_none());
+}
+
+#[test]
+fn warnings_roundtrip() {
+    let (_dir, storage) = open_temp_storage();
+    let record = WarningRecord {
+        timestamp: 1700000000,
+        anomalies: vec![simplefin::Anomaly::NewAccount {
+            account_id: "acc-new".to_string(),
+            account_name: "New Checking".to_string(),
+            balance: Decimal::from_str("500.00").unwrap(),
+        }],
+        bridge_messages: vec!["Date range capped to 90 days".to_string()],
+    };
+    storage.save_warnings(&record).unwrap();
+
+    let loaded = storage.get_warnings().unwrap().unwrap();
+    assert_eq!(loaded.timestamp, 1700000000);
+    assert_eq!(loaded.anomalies.len(), 1);
+    assert_eq!(loaded.bridge_messages.len(), 1);
+    assert_eq!(loaded.bridge_messages[0], "Date range capped to 90 days");
+}
+
+#[test]
+fn warnings_overwrite_previous() {
+    let (_dir, storage) = open_temp_storage();
+
+    let first = WarningRecord {
+        timestamp: 1700000000,
+        anomalies: vec![],
+        bridge_messages: vec!["First message".to_string()],
+    };
+    storage.save_warnings(&first).unwrap();
+
+    let second = WarningRecord {
+        timestamp: 1700100000,
+        anomalies: vec![],
+        bridge_messages: vec!["Second message".to_string()],
+    };
+    storage.save_warnings(&second).unwrap();
+
+    let loaded = storage.get_warnings().unwrap().unwrap();
+    assert_eq!(loaded.timestamp, 1700100000);
+    assert_eq!(loaded.bridge_messages, vec!["Second message"]);
+}
+
+// === Status ===
+
+#[test]
+fn status_on_fresh_storage() {
+    let (_dir, storage) = open_temp_storage();
+    let status = compute_status(&storage, 1_000_000).unwrap();
+    assert!(status.last_collection_time.is_none());
+    assert_eq!(status.account_count, 0);
+    assert_eq!(status.manual_account_count, 0);
+    assert!(status.stale_manual_accounts.is_empty());
+    assert!(status.warnings.is_none());
+}
+
+#[test]
+fn status_after_collection() {
+    let (_dir, mut storage) = open_temp_storage();
+    let org = test_org("org1", "Bank");
+    let acc = test_account("acc1", "Checking", &org);
+    storage.upsert_organizations(&[org]).unwrap();
+    storage.upsert_accounts(&[acc]).unwrap();
+    storage
+        .record_balance("acc1", 1700000000, Decimal::from_str("1000.00").unwrap())
+        .unwrap();
+
+    let manual = ManualAccount {
+        id: "manual-test".to_string(),
+        name: "My 401k".to_string(),
+        org_name: "My Provider".to_string(),
+        currency: "USD".to_string(),
+        refresh_days: 1,
+    };
+    storage.upsert_manual_accounts(&[manual]).unwrap();
+    // Manual account has no balance history, so it's stale
+
+    let record = WarningRecord {
+        timestamp: 1700000000,
+        anomalies: vec![],
+        bridge_messages: vec!["Date range capped".to_string()],
+    };
+    storage.save_warnings(&record).unwrap();
+
+    let status = compute_status(&storage, 1700100000).unwrap();
+    assert_eq!(status.last_collection_time, Some(1700000000));
+    assert!(status.last_collection_ago.is_some());
+    assert_eq!(status.account_count, 1);
+    assert_eq!(status.manual_account_count, 1);
+    assert_eq!(status.stale_manual_accounts, vec!["My 401k"]);
+    assert!(status.warnings.is_some());
+    assert_eq!(status.warnings.unwrap().bridge_messages.len(), 1);
 }

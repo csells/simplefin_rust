@@ -1,11 +1,12 @@
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::storage::TransactionWithContext;
 
 /// Spending category for transaction classification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SpendingCategory {
     Restaurants,
@@ -45,7 +46,7 @@ pub struct SpendingRule {
 }
 
 /// Per-category spending total.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SpendingTotal {
     pub category: SpendingCategory,
     pub label: String,
@@ -54,7 +55,7 @@ pub struct SpendingTotal {
 }
 
 /// Spending summary for a time period.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SpendingSummary {
     pub categories: Vec<SpendingTotal>,
     pub total_spending: Decimal,

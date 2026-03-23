@@ -2,8 +2,9 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use simplefin::{
     AccountCategory, AccountSource, BalanceSnapshot, ClassificationField, ClassificationRule,
-    DataConfig, UnifiedAccount, classify_account, compute_changes, compute_net_worth,
-    compute_net_worth_detail, display_name_for,
+    DataConfig, UnifiedAccount, account_is_excluded, classify_account, classify_for_display,
+    compute_changes, compute_net_worth, compute_net_worth_detail, compute_net_worth_history,
+    display_name_for,
 };
 
 fn default_config() -> DataConfig {
@@ -446,4 +447,206 @@ fn detail_mode_uses_display_names() {
         .find(|c| c.category == AccountCategory::Cash)
         .unwrap();
     assert_eq!(cash.accounts[0].name, "My Checking");
+}
+
+// --- excluded_account_ids tests ---
+
+#[test]
+fn excluded_by_id() {
+    let account = make_account("acc1", "Checking", "Bank", dec!(1000));
+    let config = DataConfig {
+        excluded_account_ids: vec!["acc1".to_string()],
+        ..Default::default()
+    };
+    assert!(account_is_excluded(&account, &config));
+}
+
+#[test]
+fn not_excluded_by_id() {
+    let account = make_account("acc1", "Checking", "Bank", dec!(1000));
+    let config = DataConfig {
+        excluded_account_ids: vec!["acc2".to_string()],
+        ..Default::default()
+    };
+    assert!(!account_is_excluded(&account, &config));
+}
+
+#[test]
+fn excluded_by_id_skips_net_worth() {
+    let accounts = vec![
+        make_account("acc1", "Checking", "Bank", dec!(5000)),
+        make_account("acc2", "Savings", "Bank", dec!(3000)),
+    ];
+    let config = DataConfig {
+        excluded_account_ids: vec!["acc1".to_string()],
+        ..Default::default()
+    };
+    let summary = compute_net_worth(&accounts, &config);
+    // Only acc2 should be counted
+    assert_eq!(summary.net_worth, dec!(3000));
+}
+
+// --- classify_for_display tests ---
+
+#[test]
+fn classify_for_display_no_override() {
+    let account = make_account("acc1", "Checking", "Bank", dec!(1000));
+    let info = classify_for_display(&account, &default_config());
+    assert_eq!(info.heuristic, AccountCategory::Cash);
+    assert_eq!(info.effective, AccountCategory::Cash);
+    assert!(!info.overridden);
+}
+
+#[test]
+fn classify_for_display_with_override() {
+    let account = make_account("acc1", "Checking", "Bank", dec!(1000));
+    let mut overrides = std::collections::HashMap::new();
+    overrides.insert("acc1".to_string(), AccountCategory::Investments);
+    let config = DataConfig {
+        classification_overrides: overrides,
+        ..Default::default()
+    };
+    let info = classify_for_display(&account, &config);
+    assert_eq!(info.heuristic, AccountCategory::Cash);
+    assert_eq!(info.effective, AccountCategory::Investments);
+    assert!(info.overridden);
+}
+
+#[test]
+fn classify_for_display_confident_for_clear_match() {
+    let account = make_account("acc1", "Checking", "Bank", dec!(1000));
+    let info = classify_for_display(&account, &default_config());
+    assert!(info.confident);
+}
+
+#[test]
+fn classify_for_display_low_confidence_default_bucket() {
+    // "Unknown Account" falls to OtherAssets default — low confidence
+    let account = make_account("acc1", "Unknown Account", "Unknown Org", dec!(1000));
+    let info = classify_for_display(&account, &default_config());
+    assert_eq!(info.heuristic, AccountCategory::OtherAssets);
+    assert!(!info.confident);
+}
+
+#[test]
+fn classify_for_display_low_confidence_chase_fallback() {
+    // Chase org-level fallback to CreditCards — low confidence
+    let account = make_account("acc1", "Some Account (1234)", "Chase Bank", dec!(-500));
+    let info = classify_for_display(&account, &default_config());
+    assert_eq!(info.heuristic, AccountCategory::CreditCards);
+    assert!(!info.confident);
+}
+
+#[test]
+fn classify_for_display_high_confidence_explicit_card() {
+    // "Sapphire" is an explicit credit card keyword — high confidence
+    let account = make_account("acc1", "Sapphire Reserve", "Chase Bank", dec!(-500));
+    let info = classify_for_display(&account, &default_config());
+    assert_eq!(info.heuristic, AccountCategory::CreditCards);
+    assert!(info.confident);
+}
+
+// --- net worth history tests ---
+
+#[test]
+fn history_empty_snapshots() {
+    let accounts = vec![make_account("acc1", "Checking", "Bank", dec!(1000))];
+    let history = compute_net_worth_history(&[], &accounts, &default_config(), 5);
+    assert!(history.is_empty());
+}
+
+#[test]
+fn history_single_timestamp() {
+    let accounts = vec![make_account("acc1", "Checking", "Bank", dec!(1000))];
+    let snapshots = vec![BalanceSnapshot {
+        account_id: "acc1".to_string(),
+        timestamp: 100,
+        balance: dec!(1000),
+    }];
+    let history = compute_net_worth_history(&snapshots, &accounts, &default_config(), 5);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].timestamp, 100);
+    assert_eq!(history[0].net_worth, dec!(1000));
+}
+
+#[test]
+fn history_multiple_timestamps() {
+    let accounts = vec![make_account("acc1", "Checking", "Bank", dec!(3000))];
+    let snapshots = vec![
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 100,
+            balance: dec!(1000),
+        },
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 200,
+            balance: dec!(2000),
+        },
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 300,
+            balance: dec!(3000),
+        },
+    ];
+    let history = compute_net_worth_history(&snapshots, &accounts, &default_config(), 5);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0].net_worth, dec!(1000));
+    assert_eq!(history[1].net_worth, dec!(2000));
+    assert_eq!(history[2].net_worth, dec!(3000));
+}
+
+#[test]
+fn history_respects_n_limit() {
+    let accounts = vec![make_account("acc1", "Checking", "Bank", dec!(3000))];
+    let snapshots = vec![
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 100,
+            balance: dec!(1000),
+        },
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 200,
+            balance: dec!(2000),
+        },
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 300,
+            balance: dec!(3000),
+        },
+    ];
+    let history = compute_net_worth_history(&snapshots, &accounts, &default_config(), 2);
+    assert_eq!(history.len(), 2);
+    // Should be the last 2 timestamps
+    assert_eq!(history[0].timestamp, 200);
+    assert_eq!(history[1].timestamp, 300);
+}
+
+#[test]
+fn history_excludes_configured_accounts() {
+    let accounts = vec![
+        make_account("acc1", "Checking", "Bank", dec!(5000)),
+        make_account("acc2", "Savings", "Bank", dec!(3000)),
+    ];
+    let snapshots = vec![
+        BalanceSnapshot {
+            account_id: "acc1".to_string(),
+            timestamp: 100,
+            balance: dec!(5000),
+        },
+        BalanceSnapshot {
+            account_id: "acc2".to_string(),
+            timestamp: 100,
+            balance: dec!(3000),
+        },
+    ];
+    let config = DataConfig {
+        excluded_account_ids: vec!["acc1".to_string()],
+        ..Default::default()
+    };
+    let history = compute_net_worth_history(&snapshots, &accounts, &config, 5);
+    assert_eq!(history.len(), 1);
+    // Only acc2 counted
+    assert_eq!(history[0].net_worth, dec!(3000));
 }

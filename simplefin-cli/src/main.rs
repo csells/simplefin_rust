@@ -1,22 +1,39 @@
+mod format;
+
 use std::process::ExitCode;
 
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use chrono::{DateTime, NaiveDate};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
 use simplefin::{
     AccessClient, AccessCredentials, AccountQueryParams, BalanceHistoryFilter, BridgeClient,
-    JsonStorage, ManualAccount, SimplefinError, Storage, TransactionFilter,
+    JsonStorage, ManualAccount, SimplefinError, Storage, TransactionFilter, WarningRecord,
     DEFAULT_BRIDGE_ROOT_URL,
 };
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Text,
+}
 
 #[derive(Parser)]
 #[command(name = "simplefin", about = "SimpleFIN Bridge CLI client")]
 struct Cli {
+    /// Output raw JSON without the envelope wrapper
+    #[arg(long, global = true)]
+    raw: bool,
+
+    /// Output format
+    #[arg(long, global = true, default_value = "json")]
+    format: OutputFormat,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -118,6 +135,9 @@ enum Commands {
         /// Include per-account breakdown within each category
         #[arg(short, long)]
         detail: bool,
+        /// Show net worth over the last N collection timestamps
+        #[arg(long)]
+        history: Option<usize>,
     },
 
     /// Analyze spending by category over a date range
@@ -134,6 +154,40 @@ enum Commands {
         end_date: Option<String>,
     },
 
+    /// View and modify account configuration (classifications, display names, exclusions)
+    #[command(alias = "cfg")]
+    Configure {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+        /// List all accounts with their current configuration
+        #[arg(long)]
+        list: bool,
+        /// Account ID to configure
+        #[arg(long)]
+        set: Option<String>,
+        /// Display name to assign
+        #[arg(long)]
+        name: Option<String>,
+        /// Category override (cash, investments, other_assets, credit_cards, loans)
+        #[arg(long)]
+        category: Option<String>,
+        /// Exclude this account from net worth calculations
+        #[arg(long)]
+        exclude: bool,
+        /// Include this account in net worth calculations (remove exclusion)
+        #[arg(long)]
+        include: bool,
+    },
+
+    /// Show storage status: last collection time, account counts, stale accounts, warnings
+    #[command(alias = "st")]
+    Status {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+    },
+
     /// Find and optionally remove orphaned data files
     Cleanup {
         /// Storage directory path
@@ -143,11 +197,48 @@ enum Commands {
         #[arg(long)]
         remove: bool,
     },
+
+    /// Print JSON Schema for a given output type
+    Schema {
+        /// Output type: summary, query, spending, status, configure, accounts, transactions, stale, warnings, history, changes
+        output_type: String,
+    },
+}
+
+/// Identifies which command produced the output, for text formatting.
+enum CommandKind {
+    Summary,
+    Status,
+    Spending,
+    Query,
+    Stale,
+    Configure,
+    Message,
+    Cleanup,
+    Schema,
+}
+
+/// The result of a command handler, containing data and optionally a storage
+/// path for loading persisted warnings into the envelope.
+struct CommandOutput {
+    data: serde_json::Value,
+    storage_path: Option<String>,
+    kind: CommandKind,
+}
+
+/// Structured envelope wrapping all CLI output.
+#[derive(Serialize)]
+struct Envelope {
+    data: serde_json::Value,
+    warnings: Vec<String>,
+    errors: Vec<String>,
 }
 
 fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
+    let raw = cli.raw;
+    let output_format = cli.format.clone();
 
     let rt = match RuntimeBuilder::current_thread().build() {
         Ok(rt) => rt,
@@ -160,16 +251,98 @@ fn main() -> ExitCode {
     rt.block_on(async {
         let cx = Cx::for_request();
         match run(&cx, cli.command).await {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(output) => {
+                match output_format {
+                    OutputFormat::Text => {
+                        print!("{}", format_output_text(&output));
+                    }
+                    OutputFormat::Json => {
+                        if raw {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&output.data).unwrap_or_default()
+                            );
+                        } else {
+                            let warnings =
+                                load_warnings_for_envelope(output.storage_path.as_deref());
+                            let envelope = Envelope {
+                                data: output.data,
+                                warnings,
+                                errors: Vec::new(),
+                            };
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&envelope).unwrap_or_default()
+                            );
+                        }
+                    }
+                }
+                ExitCode::SUCCESS
+            }
             Err(e) => {
-                eprintln!("Error: {e}");
+                match output_format {
+                    OutputFormat::Text => {
+                        eprintln!("Error: {e}");
+                    }
+                    OutputFormat::Json => {
+                        if raw {
+                            eprintln!("Error: {e}");
+                        } else {
+                            let envelope = Envelope {
+                                data: serde_json::Value::Null,
+                                warnings: Vec::new(),
+                                errors: vec![e.to_string()],
+                            };
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&envelope).unwrap_or_default()
+                            );
+                        }
+                    }
+                }
                 ExitCode::FAILURE
             }
         }
     })
 }
 
-async fn run(cx: &Cx, command: Commands) -> simplefin::Result<()> {
+/// Route output through the appropriate text formatter based on command kind.
+fn format_output_text(output: &CommandOutput) -> String {
+    match output.kind {
+        CommandKind::Summary => format::format_summary(&output.data),
+        CommandKind::Status => format::format_status(&output.data),
+        CommandKind::Spending => format::format_spending(&output.data),
+        CommandKind::Query => format::format_query(&output.data),
+        CommandKind::Stale => format::format_stale(&output.data),
+        CommandKind::Configure => format::format_configure(&output.data),
+        CommandKind::Message | CommandKind::Cleanup | CommandKind::Schema => {
+            format::format_message(&output.data)
+        }
+    }
+}
+
+/// Load persisted warnings from storage for inclusion in the envelope.
+fn load_warnings_for_envelope(storage_path: Option<&str>) -> Vec<String> {
+    let Some(path) = storage_path else {
+        return Vec::new();
+    };
+    let Ok(storage) = JsonStorage::open(path) else {
+        return Vec::new();
+    };
+    let Ok(Some(record)) = storage.get_warnings() else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    for anomaly in &record.anomalies {
+        warnings.push(anomaly.to_string());
+    }
+    for msg in &record.bridge_messages {
+        warnings.push(format!("Bridge: {msg}"));
+    }
+    warnings
+}
+
+async fn run(cx: &Cx, command: Commands) -> simplefin::Result<CommandOutput> {
     match command {
         Commands::Claim {
             setup_token,
@@ -192,6 +365,23 @@ async fn run(cx: &Cx, command: Commands) -> simplefin::Result<()> {
             currency,
             refresh_days,
         } => handle_add_balance(&storage, &name, &org, &balance, &currency, refresh_days),
+        Commands::Configure {
+            storage,
+            list,
+            set,
+            name,
+            category,
+            exclude,
+            include,
+        } => handle_configure(
+            &storage,
+            list,
+            set.as_deref(),
+            name.as_deref(),
+            category.as_deref(),
+            exclude,
+            include,
+        ),
         Commands::Stale { storage } => handle_stale(&storage),
         Commands::Query {
             storage,
@@ -208,13 +398,19 @@ async fn run(cx: &Cx, command: Commands) -> simplefin::Result<()> {
             end_date.as_deref(),
             pending,
         ),
-        Commands::Summary { storage, detail } => handle_summary(&storage, detail),
+        Commands::Summary {
+            storage,
+            detail,
+            history,
+        } => handle_summary(&storage, detail, history),
         Commands::Spending {
             storage,
             start_date,
             end_date,
         } => handle_spending(&storage, start_date.as_deref(), end_date.as_deref()),
+        Commands::Status { storage } => handle_status(&storage),
         Commands::Cleanup { storage, remove } => handle_cleanup(&storage, remove),
+        Commands::Schema { output_type } => handle_schema(&output_type),
     }
 }
 
@@ -257,27 +453,32 @@ fn parse_date(raw: &str) -> simplefin::Result<i64> {
     )))
 }
 
-async fn handle_claim(cx: &Cx, setup_token: &str, bridge: &str) -> simplefin::Result<()> {
-    println!("Claiming access URL from setup token...");
+async fn handle_claim(
+    cx: &Cx,
+    setup_token: &str,
+    bridge: &str,
+) -> simplefin::Result<CommandOutput> {
+    eprintln!("Claiming access URL from setup token...");
     let client = BridgeClient::new(Some(bridge), None);
     let credentials = client.claim_access_credentials(cx, setup_token).await?;
-    println!("SIMPLEFIN_ACCESS_URL={}", credentials.access_url);
-    println!("Redirect or copy the line above into your .env file.");
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::json!({
+            "access_url": credentials.access_url,
+            "message": "Add the access_url value to your .env file as SIMPLEFIN_ACCESS_URL"
+        }),
+        storage_path: None,
+        kind: CommandKind::Message,
+    })
 }
 
-async fn handle_info(cx: &Cx, bridge: &str) -> simplefin::Result<()> {
+async fn handle_info(cx: &Cx, bridge: &str) -> simplefin::Result<CommandOutput> {
     let client = BridgeClient::new(Some(bridge), None);
     let info = client.get_info(cx).await?;
-    if info.versions.is_empty() {
-        println!("No protocol versions reported by the bridge.");
-    } else {
-        println!("Bridge supports the following protocol versions:");
-        for version in &info.versions {
-            println!("- {version}");
-        }
-    }
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::json!({ "versions": info.versions }),
+        storage_path: None,
+        kind: CommandKind::Message,
+    })
 }
 
 fn handle_add_balance(
@@ -287,7 +488,7 @@ fn handle_add_balance(
     balance_str: &str,
     currency: &str,
     refresh_days: u32,
-) -> simplefin::Result<()> {
+) -> simplefin::Result<CommandOutput> {
     let balance = Decimal::from_str(balance_str).map_err(|_| {
         SimplefinError::InvalidArgument(format!("invalid balance: \"{balance_str}\""))
     })?;
@@ -309,27 +510,34 @@ fn handle_add_balance(
     let now = chrono::Utc::now().timestamp();
     storage.record_balance(&id, now, balance)?;
 
-    println!("Recorded {org} / {name}: {balance} {currency} (refresh every {refresh_days} day(s))");
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::json!({
+            "id": id,
+            "name": name,
+            "org": org,
+            "balance": balance.to_string(),
+            "currency": currency,
+            "refresh_days": refresh_days,
+            "message": format!("Recorded {org} / {name}: {balance} {currency} (refresh every {refresh_days} day(s))")
+        }),
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Message,
+    })
 }
 
-fn handle_stale(storage_path: &str) -> simplefin::Result<()> {
+fn handle_stale(storage_path: &str) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
     let now = chrono::Utc::now().timestamp();
     let stale = storage.get_stale_accounts(now)?;
 
-    if stale.is_empty() {
-        println!("All manual account balances are up to date.");
-        return Ok(());
-    }
-
-    let output = serde_json::to_string_pretty(&stale).map_err(|e| SimplefinError::Storage {
-        message: "failed to serialize stale accounts".into(),
-        source: Some(Box::new(e)),
-    })?;
-    println!("{output}");
-
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::to_value(&stale).map_err(|e| SimplefinError::Storage {
+            message: "failed to serialize stale accounts".into(),
+            source: Some(Box::new(e)),
+        })?,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Stale,
+    })
 }
 
 /// Convert a string to a simple slug for use as an ID component.
@@ -345,14 +553,13 @@ async fn handle_collect(
     access_url: &str,
     storage_path: &str,
     verbose: bool,
-) -> simplefin::Result<()> {
+) -> simplefin::Result<CommandOutput> {
     let credentials = AccessCredentials::parse(access_url)?;
     let client = AccessClient::new(credentials, None);
     let mut storage = JsonStorage::open(storage_path)?;
 
     // Load previous accounts for anomaly detection
-    let previous_accounts = storage
-        .get_accounts(&simplefin::AccountFilter::default())?;
+    let previous_accounts = storage.get_accounts(&simplefin::AccountFilter::default())?;
 
     // Fetch all accounts with balances to know what we have
     let balances_params = AccountQueryParams {
@@ -361,24 +568,39 @@ async fn handle_collect(
     };
     let account_set = client.get_accounts(cx, &balances_params).await?;
 
+    // Collect bridge messages for persistence
+    let mut all_bridge_messages: Vec<String> = Vec::new();
+
     // Surface any messages from the bridge
     for msg in &account_set.server_messages {
         eprintln!("Bridge: {msg}");
+        all_bridge_messages.push(msg.clone());
     }
 
     if account_set.accounts.is_empty() {
-        println!("No accounts returned by the bridge.");
-        return Ok(());
+        return Ok(CommandOutput {
+            data: serde_json::json!({
+                "new_transactions": 0,
+                "accounts": 0,
+                "duplicates_skipped": 0,
+                "message": "No accounts returned by the bridge."
+            }),
+            storage_path: Some(storage_path.to_string()),
+            kind: CommandKind::Message,
+        });
     }
 
     // Detect anomalies by comparing current vs previous accounts
-    if !previous_accounts.is_empty() {
-        let anomalies =
+    let anomalies = if !previous_accounts.is_empty() {
+        let detected =
             simplefin::detect_anomalies(&account_set.accounts, &previous_accounts);
-        for anomaly in &anomalies {
+        for anomaly in &detected {
             eprintln!("{anomaly}");
         }
-    }
+        detected
+    } else {
+        Vec::new()
+    };
 
     // Upsert organizations
     let orgs: Vec<_> = account_set
@@ -417,6 +639,7 @@ async fn handle_collect(
 
         for msg in &result.server_messages {
             eprintln!("Bridge ({}): {msg}", account.name);
+            all_bridge_messages.push(format!("{}: {msg}", account.name));
         }
 
         for fetched_account in &result.accounts {
@@ -430,7 +653,7 @@ async fn handle_collect(
             }
 
             if verbose {
-                println!(
+                eprintln!(
                     "  {}: {} new, {} existing",
                     fetched_account.name, new_count, dupe_count
                 );
@@ -442,12 +665,39 @@ async fn handle_collect(
         }
     }
 
-    println!(
-        "Collected {} new transactions across {} accounts ({} duplicates skipped)",
-        total_new, account_count, total_dupes
-    );
+    // Persist warnings for later retrieval by status/summary
+    let warning_record = WarningRecord {
+        timestamp: now,
+        anomalies,
+        bridge_messages: all_bridge_messages,
+    };
+    storage.save_warnings(&warning_record)?;
 
-    Ok(())
+    let is_first_run = previous_accounts.is_empty();
+
+    let mut data = serde_json::json!({
+        "new_transactions": total_new,
+        "accounts": account_count,
+        "duplicates_skipped": total_dupes,
+        "first_run": is_first_run,
+        "message": format!(
+            "Collected {} new transactions across {} accounts ({} duplicates skipped)",
+            total_new, account_count, total_dupes
+        )
+    });
+
+    if is_first_run {
+        data["hint"] = serde_json::json!(
+            "First collection complete. Run 'simplefin configure --list' to review account classifications."
+        );
+        eprintln!("Hint: Run 'simplefin configure --list' to review account classifications.");
+    }
+
+    Ok(CommandOutput {
+        data,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Message,
+    })
 }
 
 fn handle_query(
@@ -457,7 +707,7 @@ fn handle_query(
     start_date: Option<&str>,
     end_date: Option<&str>,
     include_pending: bool,
-) -> simplefin::Result<()> {
+) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
 
     let start = start_date.map(parse_date).transpose()?;
@@ -493,27 +743,23 @@ fn handle_query(
 
     let unified = simplefin::unify_accounts(&accounts, &manual_accounts, &balance_history);
 
-    let output = serde_json::json!({
-        "organizations": organizations,
-        "accounts": unified,
-        "transactions": transactions,
-        "balance_history": balance_history,
-    });
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).map_err(|e| {
-            SimplefinError::Storage {
-                message: "failed to serialize query output".into(),
-                source: Some(Box::new(e)),
-            }
-        })?
-    );
-
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::json!({
+            "organizations": organizations,
+            "accounts": unified,
+            "transactions": transactions,
+            "balance_history": balance_history,
+        }),
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Query,
+    })
 }
 
-fn handle_summary(storage_path: &str, detail: bool) -> simplefin::Result<()> {
+fn handle_summary(
+    storage_path: &str,
+    detail: bool,
+    history: Option<usize>,
+) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
     let config = storage.get_config()?;
 
@@ -541,29 +787,29 @@ fn handle_summary(storage_path: &str, detail: bool) -> simplefin::Result<()> {
         Vec::new()
     };
 
-    let output = serde_json::json!({
+    let mut data = serde_json::json!({
         "net_worth": summary,
         "changes": changes,
     });
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).map_err(|e| {
-            SimplefinError::Storage {
-                message: "failed to serialize summary output".into(),
-                source: Some(Box::new(e)),
-            }
-        })?
-    );
+    if let Some(n) = history {
+        let time_series =
+            simplefin::compute_net_worth_history(&all_history, &unified, &config, n);
+        data["history"] = serde_json::to_value(&time_series).unwrap_or_default();
+    }
 
-    Ok(())
+    Ok(CommandOutput {
+        data,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Summary,
+    })
 }
 
 fn handle_spending(
     storage_path: &str,
     start_date: Option<&str>,
     end_date: Option<&str>,
-) -> simplefin::Result<()> {
+) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
     let config = storage.get_config()?;
 
@@ -579,46 +825,206 @@ fn handle_spending(
 
     let summary = simplefin::compute_spending(&transactions, &config.spending_rules);
 
-    let output = serde_json::to_string_pretty(&summary).map_err(|e| SimplefinError::Storage {
-        message: "failed to serialize spending output".into(),
-        source: Some(Box::new(e)),
-    })?;
-    println!("{output}");
-
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
+            message: "failed to serialize spending output".into(),
+            source: Some(Box::new(e)),
+        })?,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Spending,
+    })
 }
 
-fn handle_cleanup(storage_path: &str, remove: bool) -> simplefin::Result<()> {
+fn handle_configure(
+    storage_path: &str,
+    list: bool,
+    set_id: Option<&str>,
+    display_name: Option<&str>,
+    category: Option<&str>,
+    exclude: bool,
+    include: bool,
+) -> simplefin::Result<CommandOutput> {
+    let storage = JsonStorage::open(storage_path)?;
+
+    if list || set_id.is_none() {
+        // List mode: show all accounts with configuration
+        let accounts = storage.get_accounts(&simplefin::AccountFilter::default())?;
+        let manual_accounts = storage.get_manual_accounts()?;
+        let all_history = storage.get_balance_history(&BalanceHistoryFilter::default())?;
+        let config = storage.get_config()?;
+
+        let unified = simplefin::unify_accounts(&accounts, &manual_accounts, &all_history);
+
+        let account_configs: Vec<serde_json::Value> = unified
+            .iter()
+            .map(|account| {
+                let classification = simplefin::classify_for_display(account, &config);
+                let excluded = simplefin::account_is_excluded(account, &config);
+                let display_name = simplefin::display_name_for(account, &config);
+                serde_json::json!({
+                    "id": account.id,
+                    "name": account.name,
+                    "display_name": display_name,
+                    "org_name": account.org_name,
+                    "source": account.source,
+                    "balance": account.balance.to_string(),
+                    "heuristic_classification": classification.heuristic,
+                    "effective_classification": classification.effective,
+                    "overridden": classification.overridden,
+                    "confident": classification.confident,
+                    "excluded": excluded,
+                })
+            })
+            .collect();
+
+        return Ok(CommandOutput {
+            data: serde_json::json!({ "accounts": account_configs }),
+            storage_path: Some(storage_path.to_string()),
+            kind: CommandKind::Configure,
+        });
+    }
+
+    // Set mode: modify config for a specific account
+    let account_id = set_id.unwrap();
+    let mut config = storage.get_config()?;
+    let mut changes = Vec::new();
+
+    if let Some(name) = display_name {
+        config
+            .display_names
+            .insert(account_id.to_string(), name.to_string());
+        changes.push(format!("display name set to \"{name}\""));
+    }
+
+    if let Some(cat_str) = category {
+        let cat = parse_category(cat_str)?;
+        config
+            .classification_overrides
+            .insert(account_id.to_string(), cat);
+        changes.push(format!("classification set to {cat}"));
+    }
+
+    if exclude {
+        if !config.excluded_account_ids.contains(&account_id.to_string()) {
+            config.excluded_account_ids.push(account_id.to_string());
+        }
+        changes.push("excluded from net worth".to_string());
+    }
+
+    if include {
+        config
+            .excluded_account_ids
+            .retain(|id| id != account_id);
+        // Also remove from pattern-based exclusions if the ID matches
+        changes.push("included in net worth".to_string());
+    }
+
+    if changes.is_empty() {
+        return Err(SimplefinError::InvalidArgument(
+            "no changes specified. Use --name, --category, --exclude, or --include".into(),
+        ));
+    }
+
+    storage.set_config(&config)?;
+
+    Ok(CommandOutput {
+        data: serde_json::json!({
+            "account_id": account_id,
+            "changes": changes,
+            "message": format!("Updated {account_id}: {}", changes.join(", "))
+        }),
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Message,
+    })
+}
+
+fn parse_category(s: &str) -> simplefin::Result<simplefin::AccountCategory> {
+    match s.to_lowercase().replace(' ', "_").as_str() {
+        "cash" => Ok(simplefin::AccountCategory::Cash),
+        "investments" => Ok(simplefin::AccountCategory::Investments),
+        "other_assets" | "otherassets" => Ok(simplefin::AccountCategory::OtherAssets),
+        "credit_cards" | "creditcards" => Ok(simplefin::AccountCategory::CreditCards),
+        "loans" => Ok(simplefin::AccountCategory::Loans),
+        _ => Err(SimplefinError::InvalidArgument(format!(
+            "unknown category \"{s}\". Valid: cash, investments, other_assets, credit_cards, loans"
+        ))),
+    }
+}
+
+fn handle_status(storage_path: &str) -> simplefin::Result<CommandOutput> {
+    let storage = JsonStorage::open(storage_path)?;
+    let now = chrono::Utc::now().timestamp();
+    let status = simplefin::compute_status(&storage, now)?;
+
+    Ok(CommandOutput {
+        data: serde_json::to_value(&status).map_err(|e| SimplefinError::Storage {
+            message: "failed to serialize status".into(),
+            source: Some(Box::new(e)),
+        })?,
+        storage_path: None, // status already includes warnings, skip envelope duplication
+        kind: CommandKind::Status,
+    })
+}
+
+fn handle_cleanup(storage_path: &str, remove: bool) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
     let orphans = storage.find_orphaned_data()?;
 
-    if orphans.is_empty() {
-        println!("No orphaned data found.");
-        return Ok(());
-    }
-
-    if remove {
-        println!("Removing {} orphaned file(s):", orphans.len());
-        for orphan in &orphans {
-            println!(
-                "  {} ({:?}): {}",
-                orphan.account_id, orphan.data_type, orphan.path
-            );
-        }
+    if remove && !orphans.is_empty() {
         storage.remove_orphaned_data(&orphans)?;
-        println!("Done.");
-    } else {
-        println!(
-            "Found {} orphaned file(s) (use --remove to delete):",
-            orphans.len()
-        );
-        for orphan in &orphans {
-            println!(
-                "  {} ({:?}): {}",
-                orphan.account_id, orphan.data_type, orphan.path
-            );
-        }
     }
 
-    Ok(())
+    Ok(CommandOutput {
+        data: serde_json::json!({
+            "orphaned_files": orphans.len(),
+            "removed": remove && !orphans.is_empty(),
+            "orphans": serde_json::to_value(&orphans).unwrap_or_default(),
+        }),
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Cleanup,
+    })
+}
+
+fn handle_schema(output_type: &str) -> simplefin::Result<CommandOutput> {
+    use schemars::schema_for;
+
+    let schema = match output_type {
+        "summary" => schema_for!(simplefin::NetWorthSummary),
+        "accounts" => schema_for!(simplefin::UnifiedAccount),
+        "transactions" => schema_for!(simplefin::TransactionWithContext),
+        "query" => {
+            // Query returns both accounts and transactions
+            serde_json::from_value(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "accounts": schema_for!(Vec<simplefin::UnifiedAccount>),
+                    "transactions": schema_for!(Vec<simplefin::TransactionWithContext>),
+                }
+            }))
+            .unwrap()
+        }
+        "spending" => schema_for!(simplefin::SpendingSummary),
+        "status" => schema_for!(simplefin::StorageStatus),
+        "stale" => schema_for!(Vec<simplefin::StaleAccount>),
+        "warnings" => schema_for!(simplefin::WarningRecord),
+        "history" => schema_for!(Vec<simplefin::NetWorthTimePoint>),
+        "changes" => schema_for!(Vec<simplefin::BalanceChange>),
+        other => {
+            return Err(SimplefinError::InvalidArgument(format!(
+                "unknown schema type '{other}'. Valid types: summary, query, accounts, transactions, spending, status, stale, warnings, history, changes"
+            )));
+        }
+    };
+
+    let data = serde_json::to_value(schema)
+        .map_err(|e| SimplefinError::DataFormat {
+            message: format!("failed to serialize schema: {e}"),
+            source: None,
+        })?;
+
+    Ok(CommandOutput {
+        data,
+        storage_path: None,
+        kind: CommandKind::Schema,
+    })
 }

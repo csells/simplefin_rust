@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::AccountCategory;
@@ -33,7 +34,7 @@ pub struct TransactionFilter {
 }
 
 /// A transaction paired with context from its parent account and organization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TransactionWithContext {
     pub id: String,
     pub account_id: String,
@@ -69,7 +70,7 @@ fn is_default_refresh_days(v: &u32) -> bool {
 }
 
 /// A balance snapshot for a single account at a point in time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BalanceSnapshot {
     pub account_id: String,
     pub timestamp: i64,
@@ -85,7 +86,7 @@ pub struct BalanceHistoryFilter {
 }
 
 /// Source of a unified account.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountSource {
     Simplefin,
@@ -93,7 +94,7 @@ pub enum AccountSource {
 }
 
 /// A unified view of an account from any source (SimpleFIN or manual).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UnifiedAccount {
     pub id: String,
     pub name: String,
@@ -194,6 +195,10 @@ pub struct DataConfig {
     /// User-defined rules for classifying transactions into spending categories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spending_rules: Vec<crate::spending::SpendingRule>,
+
+    /// Account IDs to exclude from net worth calculations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_account_ids: Vec<String>,
 }
 
 /// Orphaned data found during cleanup.
@@ -213,7 +218,7 @@ pub enum OrphanedDataType {
 }
 
 /// A manual account whose balance is stale and needs updating.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StaleAccount {
     pub id: String,
     pub name: String,
@@ -221,6 +226,68 @@ pub struct StaleAccount {
     pub last_updated: Option<i64>,
     pub refresh_days: u32,
     pub days_since_update: Option<u64>,
+}
+
+/// Warnings and anomalies recorded during the most recent collection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WarningRecord {
+    /// Epoch timestamp when the collection occurred.
+    pub timestamp: i64,
+    /// Anomalies detected by comparing current vs previous account balances.
+    pub anomalies: Vec<crate::anomaly::Anomaly>,
+    /// Informational messages returned by the SimpleFIN bridge.
+    pub bridge_messages: Vec<String>,
+}
+
+/// A snapshot of the storage state, useful for quick AI-agent assessment.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct StorageStatus {
+    /// Epoch timestamp of the most recent collection, if any.
+    pub last_collection_time: Option<i64>,
+    /// Human-readable description of how long ago the last collection was.
+    pub last_collection_ago: Option<String>,
+    /// Number of SimpleFIN accounts.
+    pub account_count: usize,
+    /// Number of manually-tracked accounts.
+    pub manual_account_count: usize,
+    /// Names of manual accounts whose balances are stale.
+    pub stale_manual_accounts: Vec<String>,
+    /// Warnings from the most recent collection.
+    pub warnings: Option<WarningRecord>,
+}
+
+/// Compute a status snapshot from storage, composing existing trait methods.
+pub fn compute_status(storage: &dyn Storage, now: i64) -> Result<StorageStatus> {
+    let accounts = storage.get_accounts(&AccountFilter::default())?;
+    let manual_accounts = storage.get_manual_accounts()?;
+    let stale = storage.get_stale_accounts(now)?;
+    let warnings = storage.get_warnings()?;
+
+    // Find last collection time from balance history timestamps
+    let all_history = storage.get_balance_history(&BalanceHistoryFilter::default())?;
+    let last_collection_time = all_history.iter().map(|s| s.timestamp).max();
+
+    let last_collection_ago = last_collection_time.map(|ts| {
+        let elapsed_secs = now - ts;
+        if elapsed_secs < 60 {
+            "just now".to_string()
+        } else if elapsed_secs < 3600 {
+            format!("{} minutes ago", elapsed_secs / 60)
+        } else if elapsed_secs < 86400 {
+            format!("{} hours ago", elapsed_secs / 3600)
+        } else {
+            format!("{} days ago", elapsed_secs / 86400)
+        }
+    });
+
+    Ok(StorageStatus {
+        last_collection_time,
+        last_collection_ago,
+        account_count: accounts.len(),
+        manual_account_count: manual_accounts.len(),
+        stale_manual_accounts: stale.into_iter().map(|s| s.name).collect(),
+        warnings,
+    })
 }
 
 /// Abstraction for persisting and querying collected SimpleFIN data.
@@ -276,4 +343,10 @@ pub trait Storage {
 
     /// Remove orphaned data files.
     fn remove_orphaned_data(&self, orphans: &[OrphanedData]) -> Result<()>;
+
+    /// Save warnings from the most recent collection, replacing any previous warnings.
+    fn save_warnings(&self, record: &WarningRecord) -> Result<()>;
+
+    /// Load warnings from the most recent collection, if any.
+    fn get_warnings(&self) -> Result<Option<WarningRecord>>;
 }

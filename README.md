@@ -56,32 +56,59 @@ Commands:
   info         Query the bridge for supported protocol versions
   collect      Collect all financial data idempotently into local storage
   add-balance  Add or update a manual account balance (for accounts not in SimpleFIN)
+  status       Show storage status: last collection, account counts, stale accounts, warnings
   stale        Show manual accounts whose balances are stale and need updating
   query        Query collected data as JSON
-  summary      Show categorized net worth summary with changes since last collection
+  summary      Show categorized net worth summary with changes and optional history
   spending     Analyze spending by category over a date range
+  configure    View and modify account classifications, display names, exclusions
+  schema       Print JSON Schema for a given output type
   cleanup      Find and optionally remove orphaned data files
+
+Global flags:
+  --format json|text   Output format (default: json)
+  --raw                Output bare JSON without envelope wrapper
 ```
+
+### Output format
+
+All commands output a structured envelope by default:
+
+```json
+{
+  "data": { ... },
+  "warnings": ["WARNING: Account balance dropped to $0 (was 1234.56)"],
+  "errors": []
+}
+```
+
+Use `--raw` for bare JSON (no envelope). Use `--format text` for human-readable
+table output.
 
 ### Collect financial data
 
 Fetches all accounts and transactions from SimpleFIN, stores them locally. Safe
 to run repeatedly -- transactions are deduped by ID, balance snapshots are
-deduped when unchanged.
+deduped when unchanged. Warnings and anomalies are persisted and included in
+the envelope for subsequent commands.
 
 ```bash
 simplefin collect --storage ./data --verbose
 ```
 
-Output:
-```
-  Savings (1234): 12 new, 0 existing
-  Checking (5678): 45 new, 23 existing
-Collected 57 new transactions across 8 accounts (23 duplicates skipped)
-```
-
 Bridge messages (auth issues, date caps) are printed to stderr so you'll always
 know if an account has problems.
+
+### Check storage status
+
+Quick snapshot of the current state -- useful before other operations:
+
+```bash
+simplefin status --storage ./data
+```
+
+Returns last collection time, account counts, stale manual accounts, and any
+warnings from the most recent collection.
 
 ### Add manual account balances
 
@@ -138,62 +165,53 @@ simplefin summary -s ./data
 
 # Include per-account breakdown within each category
 simplefin summary -s ./data --detail
+
+# Show net worth over the last 10 collection timestamps
+simplefin summary -s ./data --history 10
+
+# Human-readable table
+simplefin --format text summary -s ./data --detail
 ```
 
-Output:
-```json
-{
-  "net_worth": {
-    "categories": [
-      { "category": "cash", "label": "Cash", "total": "5000.00" },
-      { "category": "investments", "label": "Investments", "total": "50000.00" },
-      { "category": "other_assets", "label": "Other Assets", "total": "10000.00" },
-      { "category": "credit_cards", "label": "Credit Cards", "total": "-1500.00" },
-      { "category": "loans", "label": "Loans", "total": "-150000.00" }
-    ],
-    "total_assets": "65000.00",
-    "total_liabilities": "-151500.00",
-    "net_worth": "-86500.00"
-  },
-  "changes": [
-    {
-      "account_name": "Checking (1234)",
-      "previous_balance": "4500.00",
-      "current_balance": "5000.00",
-      "change": "500.00",
-      "category": "cash"
-    }
-  ]
-}
+### Configure accounts
+
+View and modify account classifications, display names, and exclusions:
+
+```bash
+# List all accounts with their classifications
+simplefin configure -s ./data --list
+
+# Human-readable with confidence flags
+simplefin --format text configure -s ./data --list
+
+# Set a display name
+simplefin configure -s ./data --set "ACCOUNT-ID" --name "My Friendly Name"
+
+# Override classification
+simplefin configure -s ./data --set "ACCOUNT-ID" --category investments
+
+# Exclude/include from net worth
+simplefin configure -s ./data --set "ACCOUNT-ID" --exclude
+simplefin configure -s ./data --set "ACCOUNT-ID" --include
 ```
 
-### Configuration
+Valid categories: `cash`, `investments`, `other_assets`, `credit_cards`, `loans`.
 
-User-specific settings are stored in `config.json` in the data directory (not
-in the repo):
+Configuration is stored in `config.json` in the data directory (not in the
+repo). It also supports `excluded_account_patterns`, `classification_rules`,
+and `spending_rules` for bulk matching -- see `schema` command for details.
 
-```json
-{
-  "excluded_account_patterns": ["Duplicate Account"],
-  "classification_overrides": {
-    "some-account-id": "cash"
-  }
-}
+### JSON Schema
+
+Get the JSON Schema for any output type:
+
+```bash
+simplefin schema summary
+simplefin schema status
+simplefin schema spending
+simplefin schema accounts
+simplefin schema transactions
 ```
-
-- **`excluded_account_patterns`** -- account names matching these patterns
-  (case-insensitive) are excluded from net worth and change calculations.
-  Useful for authorized-user duplicates.
-- **`classification_overrides`** -- maps account IDs to specific categories
-  (`cash`, `investments`, `other_assets`, `credit_cards`, `loans`),
-  overriding the heuristic classifier.
-- **`classification_rules`** -- ordered list of pattern-matching rules checked
-  before the heuristic classifier. Each rule has a `pattern` (substring),
-  `field` (`name` or `org`), and target `category`. First match wins.
-- **`display_names`** -- maps account IDs to friendly display names shown in
-  summary output instead of the raw account name.
-- **`spending_rules`** -- custom rules for classifying transactions into
-  spending categories, overriding the built-in keyword patterns.
 
 ### Spending analysis
 
@@ -233,7 +251,8 @@ against the previously stored values and warns about:
 - Accounts that disappeared
 - New accounts that appeared
 
-Warnings are printed to stderr alongside bridge messages.
+Warnings are persisted to `warnings.json` and automatically included in the
+envelope output of subsequent commands.
 
 ## Library API
 
@@ -291,6 +310,7 @@ Data is stored as JSON files with atomic writes (write-to-tmp + rename):
   manual_accounts.json       -- manually-tracked accounts (with refresh_days)
   balance_history/{account}.json -- balance snapshots over time
   config.json                -- user-specific settings (exclusions, overrides)
+  warnings.json              -- anomalies and bridge messages from last collection
   state.json                 -- incremental collection bookmarks
 ```
 
@@ -329,7 +349,7 @@ the LLM's head.
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (zero warnings required)
-cargo test           # Run all tests (186 currently)
+cargo test           # Run all tests (222 currently)
 ```
 
 ## Resources

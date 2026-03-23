@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -6,7 +7,7 @@ use std::fmt;
 use crate::storage::{BalanceSnapshot, ClassificationField, DataConfig, UnifiedAccount};
 
 /// Standard account categories for net worth reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountCategory {
     Cash,
@@ -93,7 +94,7 @@ pub fn classify_account(name: &str, org_name: &str) -> AccountCategory {
 }
 
 /// Per-account detail within a category.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AccountDetail {
     pub id: String,
     pub name: String,
@@ -102,7 +103,7 @@ pub struct AccountDetail {
 }
 
 /// Per-category total in a net worth summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CategoryTotal {
     pub category: AccountCategory,
     pub label: String,
@@ -112,7 +113,7 @@ pub struct CategoryTotal {
 }
 
 /// Categorized net worth summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NetWorthSummary {
     pub categories: Vec<CategoryTotal>,
     pub total_assets: Decimal,
@@ -120,8 +121,11 @@ pub struct NetWorthSummary {
     pub net_worth: Decimal,
 }
 
-/// Returns true if this account should be excluded based on config patterns.
+/// Returns true if this account should be excluded based on config patterns or IDs.
 fn is_excluded(account: &UnifiedAccount, config: &DataConfig) -> bool {
+    if config.excluded_account_ids.contains(&account.id) {
+        return true;
+    }
     let lower_name = account.name.to_lowercase();
     config
         .excluded_account_patterns
@@ -136,6 +140,84 @@ pub fn display_name_for(account: &UnifiedAccount, config: &DataConfig) -> String
         .get(&account.id)
         .cloned()
         .unwrap_or_else(|| account.name.clone())
+}
+
+/// Returns whether an account is excluded from net worth calculations.
+pub fn account_is_excluded(account: &UnifiedAccount, config: &DataConfig) -> bool {
+    is_excluded(account, config)
+}
+
+/// Classification details for display purposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassificationInfo {
+    /// What the heuristic classifier would choose (ignoring overrides/rules).
+    pub heuristic: AccountCategory,
+    /// The effective classification after overrides and rules.
+    pub effective: AccountCategory,
+    /// Whether the effective classification differs from the heuristic.
+    pub overridden: bool,
+    /// Whether the heuristic classification is high-confidence.
+    /// Low confidence when: org-level fallback, default bucket, or conflicting keywords.
+    pub confident: bool,
+}
+
+/// Classify an account and return both heuristic and effective classifications.
+pub fn classify_for_display(account: &UnifiedAccount, config: &DataConfig) -> ClassificationInfo {
+    let heuristic = classify_account(&account.name, &account.org_name);
+    let effective = classify_with_config(account, config);
+    let confident = is_classification_confident(&account.name, &account.org_name, heuristic);
+    ClassificationInfo {
+        heuristic,
+        effective,
+        overridden: heuristic != effective,
+        confident,
+    }
+}
+
+/// Determine whether the heuristic classification is confident.
+///
+/// Low confidence when: org-level fallback was used (e.g. Chase catch-all),
+/// name contains conflicting keywords, or no positive keyword match was found
+/// (default to OtherAssets).
+fn is_classification_confident(name: &str, org_name: &str, category: AccountCategory) -> bool {
+    let lower_name = name.to_lowercase();
+    let lower_org = org_name.to_lowercase();
+
+    // Default fallback to OtherAssets is always low confidence
+    if category == AccountCategory::OtherAssets
+        && !lower_name.contains("home")
+        && !lower_name.contains("cottage")
+        && !lower_name.contains("house")
+        && !lower_name.contains("property")
+        && !lower_name.contains("car")
+        && !lower_name.contains("vehicle")
+        && !lower_name.contains("hsa")
+        && !lower_org.contains("healthequity")
+    {
+        return false;
+    }
+
+    // Chase org-level fallback: anything at Chase that isn't checking/savings = credit card
+    // This is fragile — flag it as low confidence
+    if category == AccountCategory::CreditCards
+        && lower_org.contains("chase")
+        && !lower_name.contains("credit card")
+        && !lower_name.contains("sapphire")
+        && !lower_name.contains("freedom")
+    {
+        return false;
+    }
+
+    // AmEx org-level fallback
+    if category == AccountCategory::CreditCards
+        && lower_org.contains("american express")
+        && !lower_name.contains("credit card")
+        && !lower_name.contains("card")
+    {
+        return false;
+    }
+
+    true
 }
 
 /// Classify an account, respecting config overrides and rules.
@@ -256,8 +338,71 @@ pub fn compute_net_worth_detail(
     }
 }
 
+/// A single point in a net worth time series.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetWorthTimePoint {
+    pub timestamp: i64,
+    pub net_worth: Decimal,
+    pub total_assets: Decimal,
+    pub total_liabilities: Decimal,
+}
+
+/// Compute net worth at each of the last N distinct snapshot timestamps.
+///
+/// For each timestamp, reconstructs account balances using the most recent
+/// snapshot at or before that time, then classifies and sums them.
+pub fn compute_net_worth_history(
+    snapshots: &[BalanceSnapshot],
+    accounts: &[UnifiedAccount],
+    config: &DataConfig,
+    n: usize,
+) -> Vec<NetWorthTimePoint> {
+    // Extract distinct timestamps, sorted
+    let mut timestamps: Vec<i64> = snapshots.iter().map(|s| s.timestamp).collect();
+    timestamps.sort();
+    timestamps.dedup();
+
+    // Take the last N
+    let start = if timestamps.len() > n {
+        timestamps.len() - n
+    } else {
+        0
+    };
+    let timestamps = &timestamps[start..];
+
+    timestamps
+        .iter()
+        .map(|&ts| {
+            // For each account, find the most recent snapshot at or before this timestamp
+            let reconstructed: Vec<UnifiedAccount> = accounts
+                .iter()
+                .map(|account| {
+                    let balance = snapshots
+                        .iter()
+                        .filter(|s| s.account_id == account.id && s.timestamp <= ts)
+                        .max_by_key(|s| s.timestamp)
+                        .map(|s| s.balance)
+                        .unwrap_or(Decimal::ZERO);
+                    UnifiedAccount {
+                        balance,
+                        ..account.clone()
+                    }
+                })
+                .collect();
+
+            let summary = compute_net_worth(&reconstructed, config);
+            NetWorthTimePoint {
+                timestamp: ts,
+                net_worth: summary.net_worth,
+                total_assets: summary.total_assets,
+                total_liabilities: summary.total_liabilities,
+            }
+        })
+        .collect()
+}
+
 /// A balance change for a single account between two points in time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BalanceChange {
     pub account_id: String,
     pub account_name: String,

@@ -10,9 +10,10 @@ pub mod spending;
 pub mod storage;
 
 pub use analysis::{
-    AccountCategory, AccountDetail, BalanceChange, CategoryTotal, NetWorthSummary,
-    classify_account, compute_changes, compute_net_worth, compute_net_worth_detail,
-    display_name_for,
+    AccountCategory, AccountDetail, BalanceChange, CategoryTotal, ClassificationInfo,
+    NetWorthSummary, NetWorthTimePoint, account_is_excluded, classify_account,
+    classify_for_display, compute_changes, compute_net_worth, compute_net_worth_detail,
+    compute_net_worth_history, display_name_for,
 };
 pub use anomaly::{Anomaly, detect_anomalies};
 pub use clients::{AccessClient, AccountQueryParams, BridgeClient};
@@ -27,6 +28,6 @@ pub use spending::{
 pub use storage::{
     AccountFilter, AccountSource, BalanceHistoryFilter, BalanceSnapshot, ClassificationField,
     ClassificationRule, DataConfig, JsonStorage, ManualAccount, OrgFilter, OrphanedData,
-    OrphanedDataType, StaleAccount, Storage, TransactionFilter, TransactionWithContext,
-    UnifiedAccount, unify_accounts,
+    OrphanedDataType, StaleAccount, Storage, StorageStatus, TransactionFilter,
+    TransactionWithContext, UnifiedAccount, WarningRecord, compute_status, unify_accounts,
 };

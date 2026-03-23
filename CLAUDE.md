@@ -18,7 +18,7 @@ This is a Cargo workspace mono-repo with two first-class crates:
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (must pass with zero warnings)
-cargo test           # Run all tests (186 currently)
+cargo test           # Run all tests (222 currently)
 cargo run -p simplefin-cli -- --help  # Run the CLI
 ```
 
@@ -40,24 +40,27 @@ Key patterns:
 - `models/` — Five serde-annotated structs: `BridgeInfo`, `Organization`, `Account`, `AccountSet`, `Transaction`. All derive both `Serialize` and `Deserialize`. Custom deserializers in `models/serde_helpers.rs` handle Decimal-from-string-or-number and pending-from-bool-or-number.
 - `credentials.rs` — `SetupToken` (Base64 decode → claim URL) and `AccessCredentials` (parse access URL → extract Basic Auth username/password, build endpoint URLs).
 - `clients/` — `BridgeClient` (bridge info + claim token exchange) and `AccessClient` (account/transaction queries). Both use asupersync's native HTTP client.
-- `storage/` — `Storage` trait for persisting collected data, plus `JsonStorage` (JSON-file-based default implementation). Filter types: `OrgFilter`, `AccountFilter`, `TransactionFilter`. `UnifiedAccount` merges SimpleFIN and manual accounts into one type. `unify_accounts()` combines both sources. Balance snapshots deduped when unchanged. `DataConfig` stores per-user settings (exclusion patterns, classification overrides) in the data directory. `ManualAccount` includes `refresh_days` for staleness checking. `StaleAccount` reports which manual accounts need balance updates.
-- `analysis.rs` — Financial analysis: `classify_account()` (five categories), `compute_net_worth()`/`compute_net_worth_detail()` and `compute_changes()` accept `&DataConfig` for exclusions, classification overrides/rules, and display names. Classification priority: ID override > classification rules > heuristic classifier.
+- `storage/` — `Storage` trait for persisting collected data, plus `JsonStorage` (JSON-file-based default implementation). Filter types: `OrgFilter`, `AccountFilter`, `TransactionFilter`. `UnifiedAccount` merges SimpleFIN and manual accounts into one type. `unify_accounts()` combines both sources. Balance snapshots deduped when unchanged. `DataConfig` stores per-user settings (exclusion patterns, excluded account IDs, classification overrides) in the data directory. `ManualAccount` includes `refresh_days` for staleness checking. `StaleAccount` reports which manual accounts need balance updates. `WarningRecord` persists anomalies and bridge messages from collection. `StorageStatus` and `compute_status()` provide a quick snapshot of storage state.
+- `analysis.rs` — Financial analysis: `classify_account()` (five categories), `compute_net_worth()`/`compute_net_worth_detail()` and `compute_changes()` accept `&DataConfig` for exclusions, classification overrides/rules, and display names. `compute_net_worth_history()` reconstructs net worth at historical timestamps. `classify_for_display()` returns both heuristic and effective classifications with confidence flags. Classification priority: ID override > classification rules > heuristic classifier.
 - `anomaly.rs` — Anomaly detection: `detect_anomalies()` compares current vs previous account balances, flagging balances dropped to zero, large changes (>20%), disappeared accounts, and new accounts.
 - `spending.rs` — Spending analysis: `classify_transaction()` and `compute_spending()` categorize transactions into spending categories (Restaurants, Groceries, Utilities, etc.) using built-in keyword patterns and optional custom rules.
 - `error.rs` — Single `SimplefinError` enum with variants: `InvalidSetupToken`, `DataFormat`, `Api`, `Http`, `InvalidArgument`, `Storage`.
 
-**CLI (`simplefin-cli/src/main.rs`):**
-- Clap-derived CLI with subcommands: `claim` (c), `info` (i), `collect` (l), `add-balance` (a), `stale` (t), `query` (q), `summary` (s), `spending` (p), `cleanup`
-- Loads `.env` via dotenvy for `SIMPLEFIN_ACCESS_URL`
+**CLI (`simplefin-cli/src/`):**
+- `main.rs` — Clap-derived CLI with subcommands: `claim` (c), `info` (i), `collect` (l), `add-balance` (a), `stale` (t), `query` (q), `summary` (s), `spending` (p), `configure` (cfg), `status` (st), `schema`, `cleanup`. Global flags: `--format json|text`, `--raw` (bare JSON without envelope). All commands output a structured envelope `{"data":..., "warnings":..., "errors":...}` by default.
+- `format.rs` — Human-readable text formatters for each command output type (summary table, status dashboard, spending breakdown, etc.).
+- Loads `.env` via dotenvy for `SIMPLEFIN_ACCESS_URL`. Storage path via `--storage` flag or `SIMPLEFIN_DATA` env var.
 
 ## API Flow
 
 1. User gets a setup token from the SimpleFIN Bridge UI
 2. `claim` subcommand: Base64-decodes token → POSTs to claim URL → receives access URL with embedded credentials
 3. Access URL stored as `SIMPLEFIN_ACCESS_URL` in `.env`
-4. `collect` subcommand: Fetches all accounts/transactions, persists idempotently to local JSON storage, records balance snapshots (deduped)
-5. `query` subcommand: Reads from local storage, outputs unified accounts (SimpleFIN + manual) with filtered JSON
-6. `summary` subcommand: Computes categorized net worth and balance changes since last collection
+4. `collect` subcommand: Fetches all accounts/transactions, persists idempotently to local JSON storage, records balance snapshots (deduped), persists warnings/anomalies
+5. `status` subcommand: Quick assessment of storage state (last collection, account counts, stale accounts, warnings)
+6. `query` subcommand: Reads from local storage, outputs unified accounts (SimpleFIN + manual) with filtered JSON
+7. `summary` subcommand: Computes categorized net worth, balance changes, and optional historical net worth time series
+8. `configure` subcommand: View/modify account classifications, display names, and exclusions
 
 ## Key Conventions
 

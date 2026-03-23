@@ -9,7 +9,8 @@ repository = "https://github.com/csells/simplefin_rust"
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", features = ["tls", "tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal = { version = "1", features = ["serde-with-str", "serde-with-arbitrary-precision"] }
+schemars = { version = "0.8", features = ["rust_decimal"] }
 thiserror = "2"
 base64 = "0.22"
 url = "2"
