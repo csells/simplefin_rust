@@ -226,8 +226,9 @@ simplefin spending -s ./data --start-date 2024-01-01 --end-date 2024-02-01
 ```
 
 Transactions are classified into categories (Restaurants, Groceries, Utilities,
-Transportation, Shopping, Entertainment, Healthcare, Income, Transfer, Other)
-using built-in keyword patterns and optional custom rules in `config.json`.
+Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance,
+Subscriptions, Education, Personal Care, Pets, Income, Transfer, Other) using
+built-in keyword patterns and optional custom rules in `config.json`.
 
 ### Cleanup orphaned data
 
@@ -349,7 +350,7 @@ the LLM's head.
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (zero warnings required)
-cargo test           # Run all tests (222 currently)
+cargo test           # Run all tests (265 currently)
 ```
 
 ## Resources

@@ -92,6 +92,55 @@ fn classify_401k_as_investments() {
 }
 
 #[test]
+fn classify_401k_savings_plan_as_investments() {
+    // "savings" keyword must not override "401" investment signal
+    assert_eq!(
+        classify_account("ACME 401(K) SAVINGS PLAN", "SomeProvider"),
+        AccountCategory::Investments
+    );
+}
+
+#[test]
+fn classify_403b_as_investments() {
+    assert_eq!(
+        classify_account("403b Retirement Plan", "SomeProvider"),
+        AccountCategory::Investments
+    );
+}
+
+#[test]
+fn classify_457_as_investments() {
+    assert_eq!(
+        classify_account("457(b) Deferred Compensation", "SomeProvider"),
+        AccountCategory::Investments
+    );
+}
+
+#[test]
+fn classify_pension_as_investments() {
+    assert_eq!(
+        classify_account("Pension Savings Plan", "SomeProvider"),
+        AccountCategory::Investments
+    );
+}
+
+#[test]
+fn classify_thrift_savings_as_investments() {
+    assert_eq!(
+        classify_account("Thrift Savings Plan", "Federal"),
+        AccountCategory::Investments
+    );
+}
+
+#[test]
+fn classify_annuity_as_investments() {
+    assert_eq!(
+        classify_account("Variable Annuity", "SomeProvider"),
+        AccountCategory::Investments
+    );
+}
+
+#[test]
 fn classify_schwab_as_investments() {
     assert_eq!(
         classify_account("Individual ...999 (999)", "Charles Schwab US"),

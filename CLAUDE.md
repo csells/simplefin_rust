@@ -18,7 +18,7 @@ This is a Cargo workspace mono-repo with two first-class crates:
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (must pass with zero warnings)
-cargo test           # Run all tests (222 currently)
+cargo test           # Run all tests (265 currently)
 cargo run -p simplefin-cli -- --help  # Run the CLI
 ```
 
@@ -43,7 +43,7 @@ Key patterns:
 - `storage/` — `Storage` trait for persisting collected data, plus `JsonStorage` (JSON-file-based default implementation). Filter types: `OrgFilter`, `AccountFilter`, `TransactionFilter`. `UnifiedAccount` merges SimpleFIN and manual accounts into one type. `unify_accounts()` combines both sources. Balance snapshots deduped when unchanged. `DataConfig` stores per-user settings (exclusion patterns, excluded account IDs, classification overrides) in the data directory. `ManualAccount` includes `refresh_days` for staleness checking. `StaleAccount` reports which manual accounts need balance updates. `WarningRecord` persists anomalies and bridge messages from collection. `StorageStatus` and `compute_status()` provide a quick snapshot of storage state.
 - `analysis.rs` — Financial analysis: `classify_account()` (five categories), `compute_net_worth()`/`compute_net_worth_detail()` and `compute_changes()` accept `&DataConfig` for exclusions, classification overrides/rules, and display names. `compute_net_worth_history()` reconstructs net worth at historical timestamps. `classify_for_display()` returns both heuristic and effective classifications with confidence flags. Classification priority: ID override > classification rules > heuristic classifier.
 - `anomaly.rs` — Anomaly detection: `detect_anomalies()` compares current vs previous account balances, flagging balances dropped to zero, large changes (>20%), disappeared accounts, and new accounts.
-- `spending.rs` — Spending analysis: `classify_transaction()` and `compute_spending()` categorize transactions into spending categories (Restaurants, Groceries, Utilities, etc.) using built-in keyword patterns and optional custom rules.
+- `spending.rs` — Spending analysis: `classify_transaction()` and `compute_spending()` categorize transactions into spending categories (Restaurants, Groceries, Utilities, Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance, Subscriptions, Education, Personal Care, Pets, Income, Transfer) using built-in keyword patterns and optional custom rules.
 - `error.rs` — Single `SimplefinError` enum with variants: `InvalidSetupToken`, `DataFormat`, `Api`, `Http`, `InvalidArgument`, `Storage`.
 
 **CLI (`simplefin-cli/src/`):**

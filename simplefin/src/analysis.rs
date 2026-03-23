@@ -58,15 +58,26 @@ pub fn classify_account(name: &str, org_name: &str) -> AccountCategory {
         return AccountCategory::CreditCards;
     }
 
-    // Cash — checking and savings (must precede investments check, since
-    // account names can contain investment substrings like "roth")
+    // Investment signals that override cash keywords.
+    // "401(K) Savings Plan" should be Investments, not Cash.
+    if lower_name.contains("401")
+        || lower_name.contains("403b")
+        || lower_name.contains("457")
+        || lower_name.contains("pension")
+        || lower_name.contains("annuity")
+        || lower_name.contains("thrift savings")
+    {
+        return AccountCategory::Investments;
+    }
+
+    // Cash — checking and savings (must precede remaining investments check,
+    // since account names can contain investment substrings like "roth")
     if lower_name.contains("checking") || lower_name.contains("savings") {
         return AccountCategory::Cash;
     }
 
-    // Investments — brokerage, IRA, 401(k), etc.
-    if lower_name.contains("401")
-        || lower_name.contains("ira")
+    // Investments — brokerage, IRA, org-based (401/403b/457/pension already handled above)
+    if lower_name.contains("ira")
         || lower_name.contains("brokerage")
         || lower_name.contains("roth")
         || lower_org.contains("vanguard")
