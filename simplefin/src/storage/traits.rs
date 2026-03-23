@@ -349,4 +349,11 @@ pub trait Storage {
 
     /// Load warnings from the most recent collection, if any.
     fn get_warnings(&self) -> Result<Option<WarningRecord>>;
+
+    /// Load spending patterns from storage. If no patterns file exists, seeds it
+    /// with `default_spending_patterns()` and returns those defaults.
+    fn get_spending_patterns(&self) -> Result<Vec<crate::spending::SpendingRule>>;
+
+    /// Save spending patterns to storage, replacing any existing patterns.
+    fn set_spending_patterns(&self, patterns: &[crate::spending::SpendingRule]) -> Result<()>;
 }

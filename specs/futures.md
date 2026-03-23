@@ -202,6 +202,81 @@ The official `sfin2ledger` (Python, 12 stars) does this but requires a
 separate tool and Python runtime. Building it into the Rust CLI would be
 a significant differentiator.
 
+## Problem 9: POS Prefix Noise in Transaction Descriptions
+
+**Current state:** Bank and POS systems prepend vendor-specific prefixes to
+transaction descriptions: "Ext Credit Card Debit", "SQ *", "TST*", "DD *",
+"PP*", "PURCHASE AUTHORIZED ON", "RECURRING PAYMENT", etc. These make
+merchant normalization and pattern matching harder.
+
+**Impact:** Classification rules need to account for these prefixes, and
+recurring expense detection groups the same merchant under different names
+depending on which card was used.
+
+**Future direction:** A description normalizer pipeline that strips known
+prefixes before classification. The `recurring.rs` module already has
+`normalize_merchant()` for its own use; this should be promoted to a shared
+utility used by both spending classification and recurring detection.
+
+## Problem 10: Amount-Based Classification Signals
+
+**Current state:** Transaction classification is purely description-based.
+Amount is ignored.
+
+**Impact:** A $3,000 transfer looks the same as a $3 one. A $15 monthly
+charge is probably a subscription; a $15 one-time charge is probably shopping.
+Amount patterns could disambiguate borderline classifications.
+
+**Future direction:** Add optional amount ranges to spending rules:
+```json
+{"pattern": "some vendor", "category": "subscriptions", "min_amount": -50, "max_amount": -5}
+```
+This keeps the data-driven approach while adding a second signal dimension.
+
+## Problem 11: Score-Based Classification
+
+**Current state:** Classification is first-match-wins with binary keyword
+matching. When a transaction matches multiple categories, only rule order
+determines the result.
+
+**Impact:** "CVS" could be healthcare or shopping. "Costco" could be
+groceries or shopping. The current system picks one based on rule order with
+no way to express ambiguity or confidence.
+
+**Future direction:** Score-based classification where each matching rule
+contributes a weighted score. The category with the highest total score wins.
+Custom rules get higher weight than defaults. This defers the "which category
+is right?" question until all evidence is collected rather than short-circuiting
+on the first match.
+
+## Problem 12: Data Portability and Export
+
+**Current state:** Data is stored as JSON files in a proprietary directory
+layout. No import or export capability.
+
+**Impact:** Users can't migrate to/from other tools, can't back up to
+standard formats, can't feed data into external analysis tools.
+
+**Future direction:** Export commands for common formats:
+- CSV export (accounts, transactions, balance history)
+- OFX/QFX import (bank downloads)
+- Ledger/hledger/beancount format (see Problem 8)
+- JSON export with documented schema (already partially done via `query`)
+
+## Problem 13: Storage Scaling
+
+**Current state:** All data is in flat JSON files. Every read/write loads
+the entire file into memory.
+
+**Impact:** Works fine for typical personal finance (thousands of
+transactions). Would struggle with decades of history or very active
+accounts. Transaction dedup is O(n) per account.
+
+**Future direction:** SQLite backend as an alternative to JSON files. The
+`Storage` trait already abstracts the backend, so adding a SQLite
+implementation is non-disruptive. JSON stays as the default for simplicity
+and portability; SQLite is opt-in for users who need performance.
+
 ## Implementation Priority
 
 Ordered by impact-to-effort ratio:
@@ -209,13 +284,22 @@ Ordered by impact-to-effort ratio:
 1. **Anomaly thresholds in config** -- Small, self-contained, immediately
    useful. Good first PR.
 2. **Currency symbol from account data** -- Quick win in `format_currency()`.
-3. **Spending presets** -- Move keywords to config/preset files. Categories
-   remain an enum for now.
+3. ~~**Spending presets**~~ -- **DONE.** Spending patterns now stored in
+   `spending_patterns.json` in the data directory. Seeded from defaults on
+   first use. Editable via `spending-rules` CLI subcommand.
 4. **Account classification presets** -- Same pattern as spending. Heuristic
    becomes fallback-only.
 5. **User-defined account categories** -- The big refactor. Requires touching
    every layer.
 6. **Multi-currency net worth** -- Group by currency, optional exchange rates.
-7. **Crate restructure** -- Separate engine from SimpleFIN connector.
-8. **Ledger export** -- New feature, not a fix, but high community value.
-9. **i18n for text output** -- Low priority unless adoption demands it.
+7. **POS prefix normalization** -- Promote `normalize_merchant()` to shared
+   utility.
+8. **Amount-based classification signals** -- Extend SpendingRule with
+   optional amount ranges.
+9. **Score-based classification** -- Replace first-match-wins with weighted
+   scoring.
+10. **Data portability** -- CSV/OFX export, ledger format.
+11. **Crate restructure** -- Separate engine from SimpleFIN connector.
+12. **SQLite storage backend** -- Opt-in for users who need scale.
+13. **Ledger export** -- New feature, not a fix, but high community value.
+14. **i18n for text output** -- Low priority unless adoption demands it.

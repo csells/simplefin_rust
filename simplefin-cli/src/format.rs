@@ -385,6 +385,130 @@ pub fn format_configure(data: &serde_json::Value) -> String {
     out
 }
 
+/// Format recurring expenses as a human-readable table.
+pub fn format_recurring(data: &serde_json::Value) -> String {
+    let mut out = String::new();
+    out.push_str("Recurring Expenses\n");
+    out.push_str(&"═".repeat(70));
+    out.push('\n');
+
+    if let Some(recurring) = data.get("recurring").and_then(|r| r.as_array()) {
+        if recurring.is_empty() {
+            out.push_str("  No recurring expenses detected.\n");
+        } else {
+            for expense in recurring {
+                let merchant = expense
+                    .get("merchant")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("?");
+                let amount = parse_decimal(expense.get("average_amount"));
+                let freq = expense
+                    .get("frequency_label")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("?");
+                let occurrences = expense
+                    .get("occurrences")
+                    .and_then(|o| o.as_u64())
+                    .unwrap_or(0);
+                let category = expense
+                    .get("category")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("other");
+
+                out.push_str(&format!(
+                    "  {:<30} {:>12}  {:<12} ({} txns) [{}]\n",
+                    truncate(merchant, 30),
+                    format_currency(amount),
+                    freq,
+                    occurrences,
+                    category,
+                ));
+            }
+        }
+    }
+
+    out.push_str(&"─".repeat(70));
+    out.push('\n');
+
+    let monthly_total = parse_decimal(data.get("estimated_monthly_total"));
+    out.push_str(&format!(
+        "  {:<30} {:>12}/month\n",
+        "Estimated Monthly Total",
+        format_currency(monthly_total)
+    ));
+
+    out
+}
+
+/// Format spending trends as a human-readable table.
+pub fn format_trends(data: &serde_json::Value) -> String {
+    let mut out = String::new();
+    out.push_str("Spending Trends\n");
+    out.push_str(&"═".repeat(70));
+    out.push('\n');
+
+    // Overall monthly totals
+    if let Some(monthly) = data.get("monthly_totals").and_then(|m| m.as_array()) {
+        out.push_str("  Monthly Totals:\n");
+        for month in monthly {
+            let period = month.get("period").and_then(|p| p.as_str()).unwrap_or("?");
+            let total = parse_decimal(month.get("total"));
+            let count = month
+                .get("transaction_count")
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0);
+            out.push_str(&format!(
+                "    {:<12} {:>15}  ({} txns)\n",
+                period,
+                format_currency(total),
+                count
+            ));
+        }
+    }
+
+    let avg = parse_decimal(data.get("overall_monthly_average"));
+    let direction = data
+        .get("overall_direction")
+        .and_then(|d| d.as_str())
+        .unwrap_or("stable");
+    out.push_str(&format!(
+        "  Average: {}/month ({})\n",
+        format_currency(avg),
+        direction
+    ));
+
+    // Per-category trends
+    if let Some(categories) = data.get("categories").and_then(|c| c.as_array()) {
+        out.push('\n');
+        out.push_str("  Category Trends:\n");
+        out.push_str(&"─".repeat(70));
+        out.push('\n');
+        for cat in categories {
+            let label = cat.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+            let monthly_avg = parse_decimal(cat.get("monthly_average"));
+            let direction = cat
+                .get("direction")
+                .and_then(|d| d.as_str())
+                .unwrap_or("stable");
+            let change = cat
+                .get("change_percent")
+                .and_then(|c| c.as_f64())
+                .map(|c| format!(" ({:+.0}%)", c))
+                .unwrap_or_default();
+
+            out.push_str(&format!(
+                "    {:<22} {:>15}/month  {}{}\n",
+                label,
+                format_currency(monthly_avg),
+                direction,
+                change
+            ));
+        }
+    }
+
+    out
+}
+
 /// Format a general message or simple JSON value as text.
 pub fn format_message(data: &serde_json::Value) -> String {
     if let Some(msg) = data.get("message").and_then(|m| m.as_str()) {

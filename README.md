@@ -52,18 +52,21 @@ $ simplefin --help
 SimpleFIN Bridge CLI client
 
 Commands:
-  claim        Exchange a setup token for an access URL
-  info         Query the bridge for supported protocol versions
-  collect      Collect all financial data idempotently into local storage
-  add-balance  Add or update a manual account balance (for accounts not in SimpleFIN)
-  status       Show storage status: last collection, account counts, stale accounts, warnings
-  stale        Show manual accounts whose balances are stale and need updating
-  query        Query collected data as JSON
-  summary      Show categorized net worth summary with changes and optional history
-  spending     Analyze spending by category over a date range
-  configure    View and modify account classifications, display names, exclusions
-  schema       Print JSON Schema for a given output type
-  cleanup      Find and optionally remove orphaned data files
+  claim           Exchange a setup token for an access URL
+  info            Query the bridge for supported protocol versions
+  collect         Collect all financial data idempotently into local storage
+  add-balance     Add or update a manual account balance (for accounts not in SimpleFIN)
+  status          Show storage status: last collection, account counts, stale accounts, warnings
+  stale           Show manual accounts whose balances are stale and need updating
+  query           Query collected data as JSON
+  summary         Show categorized net worth summary with changes and optional history
+  spending        Analyze spending by category over a date range
+  spending-rules  Manage spending classification patterns stored in the data directory
+  recurring       Detect recurring expenses from transaction patterns
+  trends          Analyze spending trends over time (month-over-month by category)
+  configure       View and modify account classifications, display names, exclusions
+  schema          Print JSON Schema for a given output type
+  cleanup         Find and optionally remove orphaned data files
 
 Global flags:
   --format json|text   Output format (default: json)
@@ -228,7 +231,70 @@ simplefin spending -s ./data --start-date 2024-01-01 --end-date 2024-02-01
 Transactions are classified into categories (Restaurants, Groceries, Utilities,
 Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance,
 Subscriptions, Education, Personal Care, Pets, Income, Transfer, Other) using
-built-in keyword patterns and optional custom rules in `config.json`.
+data-driven keyword patterns stored in `spending_patterns.json` in the data
+directory. Patterns are seeded with defaults on first use and customizable via
+the `spending-rules` command. Custom rules in `config.json` take priority.
+
+### Manage spending patterns
+
+Spending classification patterns are stored in `spending_patterns.json` in the
+data directory, not hardcoded in the binary. On first use, the file is seeded
+with sensible defaults. Customize to match your transactions:
+
+```bash
+# List all current patterns
+simplefin spending-rules -s ./data --list
+
+# Add a new pattern (placed at highest priority)
+simplefin spending-rules -s ./data --add "local coffee" --category restaurants
+
+# Remove patterns matching a substring
+simplefin spending-rules -s ./data --remove "chipotle"
+
+# Reset to defaults (overwrites all customizations)
+simplefin spending-rules -s ./data --reset
+```
+
+User rules in `config.json` (via `spending_rules`) take priority over patterns
+in `spending_patterns.json`. Unclassified transactions (category "Other") are
+reported in the spending output so you know what to teach.
+
+### Recurring expense detection
+
+Detect subscriptions and recurring charges from transaction patterns:
+
+```bash
+# Detect recurring expenses (default: 2+ occurrences)
+simplefin recurring -s ./data
+
+# Require at least 3 occurrences
+simplefin recurring -s ./data --min-occurrences 3
+
+# Human-readable table
+simplefin --format text recurring -s ./data
+```
+
+The detector normalizes merchant names (stripping POS prefixes and trailing IDs),
+groups by merchant, and checks for regular intervals. Output includes average
+amount, frequency, estimated next occurrence, and estimated monthly total.
+
+### Spending trends
+
+Analyze spending trends over time by category:
+
+```bash
+# Last 6 months (default)
+simplefin trends -s ./data
+
+# Last 12 months
+simplefin trends -s ./data --months 12
+
+# Human-readable table
+simplefin --format text trends -s ./data
+```
+
+Shows month-over-month spending by category, monthly averages, and trend
+direction (up, down, stable) based on recent vs earlier months.
 
 ### Cleanup orphaned data
 
@@ -311,6 +377,7 @@ Data is stored as JSON files with atomic writes (write-to-tmp + rename):
   manual_accounts.json       -- manually-tracked accounts (with refresh_days)
   balance_history/{account}.json -- balance snapshots over time
   config.json                -- user-specific settings (exclusions, overrides)
+  spending_patterns.json     -- spending classification patterns (seeded from defaults)
   warnings.json              -- anomalies and bridge messages from last collection
   state.json                 -- incremental collection bookmarks
 ```
@@ -350,7 +417,7 @@ the LLM's head.
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (zero warnings required)
-cargo test           # Run all tests (265 currently)
+cargo test           # Run all tests (277 currently)
 ```
 
 ## Resources

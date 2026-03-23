@@ -198,9 +198,54 @@ enum Commands {
         remove: bool,
     },
 
+    /// Manage spending classification patterns stored in the data directory
+    #[command(alias = "sr")]
+    SpendingRules {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+        /// List all current patterns
+        #[arg(long)]
+        list: bool,
+        /// Add a pattern for a category (e.g. --add "hulu|disney" --category entertainment)
+        #[arg(long)]
+        add: Option<String>,
+        /// Category for the pattern being added
+        #[arg(long)]
+        category: Option<String>,
+        /// Remove a pattern by substring match
+        #[arg(long)]
+        remove: Option<String>,
+        /// Reset patterns to defaults (overwrites all customizations)
+        #[arg(long)]
+        reset: bool,
+    },
+
+    /// Detect recurring expenses from transaction patterns
+    #[command(alias = "r")]
+    Recurring {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+        /// Minimum number of occurrences to consider recurring (default: 2)
+        #[arg(long, default_value = "2")]
+        min_occurrences: usize,
+    },
+
+    /// Analyze spending trends over time (month-over-month by category)
+    #[command(alias = "tr")]
+    Trends {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+        /// Number of months to analyze (default: 6)
+        #[arg(long, default_value = "6")]
+        months: usize,
+    },
+
     /// Print JSON Schema for a given output type
     Schema {
-        /// Output type: summary, query, spending, status, configure, accounts, transactions, stale, warnings, history, changes
+        /// Output type: summary, query, spending, status, configure, accounts, transactions, stale, warnings, history, changes, recurring, trends
         output_type: String,
     },
 }
@@ -216,6 +261,8 @@ enum CommandKind {
     Message,
     Cleanup,
     Schema,
+    Recurring,
+    Trends,
 }
 
 /// The result of a command handler, containing data and optionally a storage
@@ -315,6 +362,8 @@ fn format_output_text(output: &CommandOutput) -> String {
         CommandKind::Query => format::format_query(&output.data),
         CommandKind::Stale => format::format_stale(&output.data),
         CommandKind::Configure => format::format_configure(&output.data),
+        CommandKind::Recurring => format::format_recurring(&output.data),
+        CommandKind::Trends => format::format_trends(&output.data),
         CommandKind::Message | CommandKind::Cleanup | CommandKind::Schema => {
             format::format_message(&output.data)
         }
@@ -410,6 +459,19 @@ async fn run(cx: &Cx, command: Commands) -> simplefin::Result<CommandOutput> {
         } => handle_spending(&storage, start_date.as_deref(), end_date.as_deref()),
         Commands::Status { storage } => handle_status(&storage),
         Commands::Cleanup { storage, remove } => handle_cleanup(&storage, remove),
+        Commands::SpendingRules {
+            storage,
+            list,
+            add,
+            category,
+            remove,
+            reset,
+        } => handle_spending_rules(&storage, list, add.as_deref(), category.as_deref(), remove.as_deref(), reset),
+        Commands::Recurring {
+            storage,
+            min_occurrences,
+        } => handle_recurring(&storage, min_occurrences),
+        Commands::Trends { storage, months } => handle_trends(&storage, months),
         Commands::Schema { output_type } => handle_schema(&output_type),
     }
 }
@@ -823,7 +885,12 @@ fn handle_spending(
         ..Default::default()
     })?;
 
-    let summary = simplefin::compute_spending(&transactions, &config.spending_rules);
+    // User rules (from config) take priority, then patterns from storage
+    let patterns = storage.get_spending_patterns()?;
+    let mut rules = config.spending_rules.clone();
+    rules.extend(patterns);
+
+    let summary = simplefin::compute_spending(&transactions, &rules);
 
     Ok(CommandOutput {
         data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
@@ -985,6 +1052,170 @@ fn handle_cleanup(storage_path: &str, remove: bool) -> simplefin::Result<Command
     })
 }
 
+fn handle_spending_rules(
+    storage_path: &str,
+    _list: bool,
+    add: Option<&str>,
+    category: Option<&str>,
+    remove: Option<&str>,
+    reset: bool,
+) -> simplefin::Result<CommandOutput> {
+    let storage = JsonStorage::open(storage_path)?;
+
+    if reset {
+        let defaults = simplefin::default_spending_patterns();
+        storage.set_spending_patterns(&defaults)?;
+        return Ok(CommandOutput {
+            data: serde_json::json!({
+                "message": format!("Reset spending patterns to defaults ({} rules)", defaults.len()),
+                "rule_count": defaults.len(),
+            }),
+            storage_path: Some(storage_path.to_string()),
+            kind: CommandKind::Message,
+        });
+    }
+
+    if let Some(pattern) = add {
+        let cat_str = category.ok_or_else(|| {
+            SimplefinError::InvalidArgument("--category is required when adding a pattern".into())
+        })?;
+        let cat = parse_spending_category(cat_str)?;
+        let mut patterns = storage.get_spending_patterns()?;
+        patterns.insert(
+            0,
+            simplefin::SpendingRule {
+                pattern: pattern.to_string(),
+                category: cat.clone(),
+            },
+        );
+        storage.set_spending_patterns(&patterns)?;
+        return Ok(CommandOutput {
+            data: serde_json::json!({
+                "message": format!("Added pattern \"{pattern}\" -> {cat}"),
+                "rule_count": patterns.len(),
+            }),
+            storage_path: Some(storage_path.to_string()),
+            kind: CommandKind::Message,
+        });
+    }
+
+    if let Some(pattern_to_remove) = remove {
+        let mut patterns = storage.get_spending_patterns()?;
+        let before = patterns.len();
+        patterns.retain(|r| !r.pattern.to_lowercase().contains(&pattern_to_remove.to_lowercase()));
+        let removed = before - patterns.len();
+        storage.set_spending_patterns(&patterns)?;
+        return Ok(CommandOutput {
+            data: serde_json::json!({
+                "message": format!("Removed {removed} pattern(s) matching \"{pattern_to_remove}\""),
+                "removed": removed,
+                "rule_count": patterns.len(),
+            }),
+            storage_path: Some(storage_path.to_string()),
+            kind: CommandKind::Message,
+        });
+    }
+
+    // Default: list mode
+    let patterns = storage.get_spending_patterns()?;
+    let config = storage.get_config()?;
+    let data = serde_json::json!({
+        "patterns": patterns.iter().map(|r| serde_json::json!({
+            "pattern": r.pattern,
+            "category": r.category,
+        })).collect::<Vec<_>>(),
+        "pattern_count": patterns.len(),
+        "user_rules": config.spending_rules.iter().map(|r| serde_json::json!({
+            "pattern": r.pattern,
+            "category": r.category,
+        })).collect::<Vec<_>>(),
+        "user_rule_count": config.spending_rules.len(),
+    });
+
+    Ok(CommandOutput {
+        data,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Message,
+    })
+}
+
+fn parse_spending_category(s: &str) -> simplefin::Result<simplefin::SpendingCategory> {
+    match s.to_lowercase().replace(' ', "_").as_str() {
+        "restaurants" => Ok(simplefin::SpendingCategory::Restaurants),
+        "groceries" => Ok(simplefin::SpendingCategory::Groceries),
+        "utilities" => Ok(simplefin::SpendingCategory::Utilities),
+        "transportation" => Ok(simplefin::SpendingCategory::Transportation),
+        "shopping" => Ok(simplefin::SpendingCategory::Shopping),
+        "entertainment" => Ok(simplefin::SpendingCategory::Entertainment),
+        "healthcare" => Ok(simplefin::SpendingCategory::Healthcare),
+        "housing" => Ok(simplefin::SpendingCategory::Housing),
+        "insurance" => Ok(simplefin::SpendingCategory::Insurance),
+        "subscriptions" => Ok(simplefin::SpendingCategory::Subscriptions),
+        "education" => Ok(simplefin::SpendingCategory::Education),
+        "personal_care" | "personalcare" => Ok(simplefin::SpendingCategory::PersonalCare),
+        "pets" => Ok(simplefin::SpendingCategory::Pets),
+        "income" => Ok(simplefin::SpendingCategory::Income),
+        "transfer" => Ok(simplefin::SpendingCategory::Transfer),
+        "other" => Ok(simplefin::SpendingCategory::Other),
+        _ => Err(SimplefinError::InvalidArgument(format!(
+            "unknown spending category \"{s}\". Valid: restaurants, groceries, utilities, transportation, shopping, entertainment, healthcare, housing, insurance, subscriptions, education, personal_care, pets, income, transfer, other"
+        ))),
+    }
+}
+
+fn handle_recurring(
+    storage_path: &str,
+    min_occurrences: usize,
+) -> simplefin::Result<CommandOutput> {
+    let storage = JsonStorage::open(storage_path)?;
+    let config = storage.get_config()?;
+
+    let transactions = storage.get_transactions(&TransactionFilter {
+        include_pending: Some(false),
+        ..Default::default()
+    })?;
+
+    let patterns = storage.get_spending_patterns()?;
+    let mut rules = config.spending_rules.clone();
+    rules.extend(patterns);
+
+    let summary = simplefin::detect_recurring(&transactions, &rules, min_occurrences);
+
+    Ok(CommandOutput {
+        data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
+            message: "failed to serialize recurring output".into(),
+            source: Some(Box::new(e)),
+        })?,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Recurring,
+    })
+}
+
+fn handle_trends(storage_path: &str, months: usize) -> simplefin::Result<CommandOutput> {
+    let storage = JsonStorage::open(storage_path)?;
+    let config = storage.get_config()?;
+
+    let transactions = storage.get_transactions(&TransactionFilter {
+        include_pending: Some(false),
+        ..Default::default()
+    })?;
+
+    let patterns = storage.get_spending_patterns()?;
+    let mut rules = config.spending_rules.clone();
+    rules.extend(patterns);
+
+    let summary = simplefin::compute_trends(&transactions, &rules, months);
+
+    Ok(CommandOutput {
+        data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
+            message: "failed to serialize trends output".into(),
+            source: Some(Box::new(e)),
+        })?,
+        storage_path: Some(storage_path.to_string()),
+        kind: CommandKind::Trends,
+    })
+}
+
 fn handle_schema(output_type: &str) -> simplefin::Result<CommandOutput> {
     use schemars::schema_for;
 
@@ -1009,6 +1240,8 @@ fn handle_schema(output_type: &str) -> simplefin::Result<CommandOutput> {
         "warnings" => schema_for!(simplefin::WarningRecord),
         "history" => schema_for!(Vec<simplefin::NetWorthTimePoint>),
         "changes" => schema_for!(Vec<simplefin::BalanceChange>),
+        "recurring" => schema_for!(simplefin::RecurringSummary),
+        "trends" => schema_for!(simplefin::TrendsSummary),
         other => {
             return Err(SimplefinError::InvalidArgument(format!(
                 "unknown schema type '{other}'. Valid types: summary, query, accounts, transactions, spending, status, stale, warnings, history, changes"

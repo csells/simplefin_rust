@@ -29,8 +29,11 @@ The project at the workspace root has a CLI tool (`simplefin`) with these subcom
 6. **Spending** (`p`) -- categorizes transactions into spending categories with totals
 7. **Stale** (`t`) -- lists manual accounts whose balances need updating
 8. **Configure** (`cfg`) -- view and modify account classifications, display names, and exclusions
-9. **Schema** -- outputs JSON Schema for any output type (for programmatic consumers)
-10. **Cleanup** -- finds and removes orphaned data files
+9. **Spending-rules** (`sr`) -- manage spending classification patterns stored in the data directory
+10. **Recurring** (`r`) -- detect recurring expenses from transaction patterns
+11. **Trends** (`tr`) -- analyze spending trends over time (month-over-month by category)
+12. **Schema** -- outputs JSON Schema for any output type (for programmatic consumers)
+13. **Cleanup** -- finds and removes orphaned data files
 
 The CLI binary is built from this workspace. Build it if needed with `cargo build -p simplefin-cli`.
 
@@ -170,6 +173,77 @@ cargo run -p simplefin-cli -- spending --storage "$SIMPLEFIN_DATA" \
   --start-date 2024-01-01 --end-date 2024-02-01
 ```
 
+The spending output includes an `unclassified` array with objects containing both
+`description` and `amount` for transactions that fell into "Other". **Always show
+both the description and amount** when asking the user about unclassified transactions
+-- the amount helps them identify what the charge was. Then teach the classifier:
+
+```bash
+# Add a pattern for unclassified transactions
+cargo run -p simplefin-cli -- spending-rules --storage "$SIMPLEFIN_DATA" \
+  --add "some merchant name" --category restaurants
+```
+
+This saves the pattern to `spending_patterns.json` in the data directory so
+future runs classify it correctly. Over time, the "Other" bucket shrinks as
+the user teaches the system about their specific merchants.
+
+### Manage spending patterns
+
+Spending classification uses data-driven patterns, not hardcoded rules. Patterns
+are stored in `spending_patterns.json` and editable:
+
+```bash
+# List all patterns
+cargo run -p simplefin-cli -- spending-rules --storage "$SIMPLEFIN_DATA" --list
+
+# Add a new pattern (highest priority)
+cargo run -p simplefin-cli -- spending-rules --storage "$SIMPLEFIN_DATA" \
+  --add "local coffee shop" --category restaurants
+
+# Remove patterns matching a substring
+cargo run -p simplefin-cli -- spending-rules --storage "$SIMPLEFIN_DATA" \
+  --remove "chipotle"
+
+# Reset to defaults
+cargo run -p simplefin-cli -- spending-rules --storage "$SIMPLEFIN_DATA" --reset
+```
+
+### Recurring expense detection
+
+Detect subscriptions and recurring charges:
+
+```bash
+# Default: 2+ occurrences
+cargo run -p simplefin-cli -- recurring --storage "$SIMPLEFIN_DATA"
+
+# Require 3+ occurrences
+cargo run -p simplefin-cli -- recurring --storage "$SIMPLEFIN_DATA" --min-occurrences 3
+
+# Human-readable
+cargo run -p simplefin-cli -- --format text recurring --storage "$SIMPLEFIN_DATA"
+```
+
+Output includes merchant name, average amount, frequency (weekly/monthly/quarterly/annual),
+occurrence count, and estimated monthly total across all recurring expenses.
+
+### Spending trends
+
+Analyze month-over-month spending by category:
+
+```bash
+# Last 6 months (default)
+cargo run -p simplefin-cli -- trends --storage "$SIMPLEFIN_DATA"
+
+# Last 12 months
+cargo run -p simplefin-cli -- trends --storage "$SIMPLEFIN_DATA" --months 12
+
+# Human-readable
+cargo run -p simplefin-cli -- --format text trends --storage "$SIMPLEFIN_DATA"
+```
+
+Shows per-category monthly averages and trend direction (up/down/stable).
+
 ### Data cleanup
 
 ```bash
@@ -194,6 +268,8 @@ cargo run -p simplefin-cli -- schema history
 cargo run -p simplefin-cli -- schema changes
 cargo run -p simplefin-cli -- schema accounts
 cargo run -p simplefin-cli -- schema transactions
+cargo run -p simplefin-cli -- schema recurring
+cargo run -p simplefin-cli -- schema trends
 ```
 
 ## Step 5: Account configuration

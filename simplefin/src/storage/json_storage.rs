@@ -86,6 +86,10 @@ impl JsonStorage {
         self.root.join("warnings.json")
     }
 
+    fn spending_patterns_path(&self) -> PathBuf {
+        self.root.join("spending_patterns.json")
+    }
+
     fn read_json<T: serde::de::DeserializeOwned + Default>(&self, path: &Path) -> Result<T> {
         if !path.exists() {
             return Ok(T::default());
@@ -470,6 +474,21 @@ impl Storage for JsonStorage {
                 source: Some(Box::new(e)),
             })?;
         Ok(Some(record))
+    }
+
+    fn get_spending_patterns(&self) -> Result<Vec<crate::spending::SpendingRule>> {
+        let path = self.spending_patterns_path();
+        if !path.exists() {
+            // Seed with defaults on first use
+            let defaults = crate::spending::default_spending_patterns();
+            self.write_json(&path, &defaults)?;
+            return Ok(defaults);
+        }
+        self.read_json(&path)
+    }
+
+    fn set_spending_patterns(&self, patterns: &[crate::spending::SpendingRule]) -> Result<()> {
+        self.write_json(&self.spending_patterns_path(), &patterns)
     }
 
     fn get_balance_history(&self, filter: &BalanceHistoryFilter) -> Result<Vec<BalanceSnapshot>> {

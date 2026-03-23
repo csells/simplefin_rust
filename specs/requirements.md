@@ -95,6 +95,26 @@ The library MUST provide a `Storage` trait with the following operations:
 **Collection state:**
 - `last_collected(account_id)` — Returns the most recent transaction timestamp for an account (epoch seconds), used for incremental fetching.
 
+**Manual accounts:**
+- `get_manual_accounts()` — Retrieve manually-tracked accounts.
+- `upsert_manual_account(account)` — Add or update a manual account with balance snapshot.
+
+**Balance history:**
+- `get_balance_history(account_id)` — Retrieve timestamped balance snapshots.
+- `record_balance_snapshot(account_id, snapshot)` — Record a new balance data point (deduped when unchanged).
+
+**Spending patterns:**
+- `get_spending_patterns()` — Retrieve spending classification patterns from `spending_patterns.json`. Auto-seeds from `default_spending_patterns()` if file doesn't exist.
+- `set_spending_patterns(patterns)` — Persist updated spending patterns.
+
+**Configuration:**
+- `get_config()` — Retrieve user configuration from `config.json`.
+- `set_config(config)` — Persist updated configuration.
+
+**Warnings:**
+- `get_warnings()` — Retrieve persisted warnings/anomalies.
+- `set_warnings(warnings)` — Persist warnings from collection.
+
 ### 5.2 Filters
 - **OrgFilter** — Filter by org ID or name.
 - **AccountFilter** — Filter by account ID, name, or org.
@@ -138,7 +158,13 @@ A single `SimplefinError` enum with variants:
 - Exit code 0 on success, 1 on failure.
 
 ### 8.2 Subcommands
-The CLI has exactly three subcommands: `claim`, `info`, `collect`, and `query`.
+The CLI has the following subcommands:
+
+### 8.3 Output Format
+- All commands output a structured envelope by default: `{"data":..., "warnings":..., "errors":...}`
+- `--raw` flag outputs bare JSON (no envelope)
+- `--format text` outputs human-readable tables
+- Warnings are automatically populated from persisted collection data
 
 ## 9. CLI: `claim` (alias: `c`)
 - **Input:** Positional `setup_token`, optional `--bridge` URL.
@@ -157,6 +183,8 @@ The CLI has exactly three subcommands: `claim`, `info`, `collect`, and `query`.
   - On subsequent runs: fetches incrementally from the last collected timestamp per account.
   - Persists data idempotently via the `Storage` trait.
   - Transactions deduped by ID; account/org metadata updated to latest.
+  - Records balance snapshots (deduped when unchanged).
+  - Runs anomaly detection, persists warnings.
 - **Output (default):** One-line summary, e.g., "Collected 47 new transactions across 5 accounts (12 duplicates skipped)".
 - **Output (`--verbose`):** Per-account breakdown of what was added/updated.
 
@@ -168,28 +196,103 @@ The CLI has exactly three subcommands: `claim`, `info`, `collect`, and `query`.
   - `--end-date <date>` — Filter transactions to this date.
   - `--pending` — Include/exclude pending transactions.
 - **Date parsing:** Accepts epoch seconds, ISO-8601 (RFC 3339), or date-only (`YYYY-MM-DD` → midnight UTC).
-- **Output:** JSON only. No other output formats.
 - **No filters:** Dumps all collected data.
 
-## 13. Tests
+## 12a. CLI: `status` (alias: `st`)
+- **Output:** Last collection time, account counts, stale manual accounts, warnings.
 
-### 13.1 Credential Tests
+## 12b. CLI: `add-balance` (alias: `a`)
+- **Input:** `--name`, `--org`, `--balance`, optional `--refresh-days` (default 1).
+- Adds or updates a manual account balance for accounts not in SimpleFIN.
+
+## 12c. CLI: `stale` (alias: `t`)
+- **Output:** Manual accounts whose balances exceed their `refresh_days` threshold.
+
+## 12d. CLI: `summary` (alias: `s`)
+- **Output:** Categorized net worth (Cash, Investments, Other Assets, Credit Cards, Loans).
+- `--detail` — Per-account breakdown within each category.
+- `--history N` — Net worth at each of the last N collection timestamps.
+
+## 12e. CLI: `spending` (alias: `p`)
+- **Output:** Spending by category with totals, plus unclassified transaction list (description + amount).
+- `--start-date`, `--end-date` — Filter date range.
+- Classification is fully data-driven via `spending_patterns.json`.
+
+## 12f. CLI: `spending-rules` (alias: `sr`)
+- Manages spending classification patterns stored in `spending_patterns.json`.
+- `--list` — Show all patterns.
+- `--add PATTERN --category CAT` — Add a new pattern (prepended at highest priority).
+- `--remove PATTERN` — Remove patterns matching a substring.
+- `--reset` — Reset to default patterns.
+
+## 12g. CLI: `recurring` (alias: `r`)
+- **Output:** Detected recurring expenses with merchant, amount, frequency, category.
+- `--min-occurrences N` — Minimum transaction count to consider (default 2).
+
+## 12h. CLI: `trends` (alias: `tr`)
+- **Output:** Month-over-month spending by category with trend direction.
+- `--months N` — Number of months to analyze (default 6).
+
+## 12i. CLI: `configure` (alias: `cfg`)
+- View and modify account classifications, display names, and exclusions.
+- `--list` — Show all accounts with heuristic and effective classifications.
+- `--set ACCOUNT_ID` with `--name`, `--category`, `--exclude`, `--include`.
+
+## 12j. CLI: `schema`
+- Prints JSON Schema for any output type (summary, status, spending, etc.).
+
+## 12k. CLI: `cleanup`
+- Finds orphaned data files. `--remove` to delete them.
+
+## 13. Library: Analysis
+
+### 13.1 Data-Driven Classification
+- **Spending classification** MUST be fully data-driven. Patterns are stored in the user's data directory (`spending_patterns.json`), not hardcoded in the binary. The library provides `default_spending_patterns()` as seed data only. User-specific patterns from `config.json` take priority over stored patterns, which take priority over defaults.
+- **Account classification** MUST use a priority chain: per-account ID overrides > classification rules > heuristic fallback. The heuristic classifier exists as a convenience fallback; it MUST NOT be the only classification path. Users MUST be able to override any classification via config without modifying code.
+- Unclassified transactions (spending category "Other") MUST be surfaced with both description and amount so users can teach the classifier.
+
+### 13.2 Account Categories
+Five categories defined as a Rust enum: Cash, Investments, OtherAssets, CreditCards, Loans. Each has an asset/liability designation used for net worth computation. Future: user-defined categories (see `specs/futures.md` Problem 1).
+
+### 13.3 Spending Categories
+Sixteen categories defined as a Rust enum: Restaurants, Groceries, Utilities, Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance, Subscriptions, Education, PersonalCare, Pets, Income, Transfer, Other. Future: user-defined categories (see `specs/futures.md` Problem 3).
+
+### 13.4 Anomaly Detection
+Compares current vs previous account balances during collection, flags: balances dropped to zero, large changes (>20%), disappeared accounts, new accounts. Warnings persisted to `warnings.json`.
+
+### 13.5 Recurring Expense Detection
+Groups transactions by normalized merchant name (POS prefix stripping, trailing ID removal), detects regular intervals (weekly/monthly/quarterly/annual), estimates monthly cost.
+
+### 13.6 Spending Trend Analysis
+Month-over-month spending by category, monthly averages, trend direction (up/down/stable) via first-half vs second-half comparison.
+
+## 14. Tests
+
+### 14.1 Credential Tests
 - Setup token parsing: valid tokens, invalid Base64, missing scheme, missing host.
 - Access credential parsing: valid URLs, percent-decoding, Basic Auth header generation, endpoint URL construction.
 
-### 13.2 Model Tests
+### 14.2 Model Tests
 - Deserialization of all model types from JSON.
 - Serialization round-trip for all model types.
 - Custom deserializer coverage: Decimal-from-string, Decimal-from-number, pending-from-bool, pending-from-number.
 
-### 13.3 Pipeline Tests
+### 14.3 Pipeline Tests
 - End-to-end flow from raw API JSON through model deserialization, credential handling, query parameter building, business logic (filtering, deduplication), and output.
 
-### 13.4 Storage Tests
+### 14.4 Storage Tests
 - Upsert idempotency: inserting the same data twice produces the same state.
 - Incremental collection: `last_collected` tracks per-account state correctly.
 - Filter correctness: all filter combinations return expected results.
+- Spending pattern storage: get/set round-trip, auto-seeding from defaults.
 
-### 13.5 CLI Tests
+### 14.5 Analysis Tests
+- Account classification: heuristic fallback, override priority, confidence flags, investment pre-check (401k/403b/457/pension over cash keywords).
+- Spending classification: data-driven patterns, pipe-separated keywords, custom rule priority, empty rules produce "Other", unclassified surfacing with amounts.
+- Recurring detection: monthly/weekly/quarterly detection, irregular rejection, min-occurrences, merchant normalization (POS prefix stripping).
+- Trend analysis: direction detection, category aggregation, month bucketing.
+- Anomaly detection: zero-balance, large-change, disappeared/new accounts.
+
+### 14.6 CLI Tests
 - `collect` summary output accuracy.
 - `query` JSON output correctness with various filter combinations.
