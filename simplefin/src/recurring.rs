@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::spending::{SpendingCategory, SpendingRule, classify_transaction};
+use crate::spending::{SpendingRule, classify_transaction};
 use crate::storage::TransactionWithContext;
 
 /// A detected recurring expense.
@@ -12,7 +12,7 @@ pub struct RecurringExpense {
     /// Normalized merchant name used for grouping.
     pub merchant: String,
     /// Spending category of this recurring expense.
-    pub category: SpendingCategory,
+    pub category: String,
     /// Average transaction amount (negative for expenses).
     pub average_amount: Decimal,
     /// Detected frequency in days between occurrences.

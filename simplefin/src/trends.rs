@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::spending::{SpendingCategory, SpendingRule, classify_transaction};
+use crate::spending::{SpendingRule, category_label, classify_transaction};
 use crate::storage::TransactionWithContext;
 
 /// Direction of a spending trend.
@@ -40,7 +40,7 @@ pub struct MonthlyTotal {
 /// Spending trend for a single category across multiple months.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CategoryTrend {
-    pub category: SpendingCategory,
+    pub category: String,
     pub label: String,
     /// Monthly totals for this category, ordered chronologically.
     pub months: Vec<MonthlyTotal>,
@@ -121,7 +121,7 @@ pub fn compute_trends(
     let cutoff_ts = cutoff.timestamp();
 
     // Group transactions by (period, category)
-    let mut by_period_category: HashMap<(String, SpendingCategory), (Decimal, usize)> =
+    let mut by_period_category: HashMap<(String, String), (Decimal, usize)> =
         HashMap::new();
     let mut by_period: HashMap<String, (Decimal, usize)> = HashMap::new();
 
@@ -132,7 +132,7 @@ pub fn compute_trends(
 
         // Only count spending (negative amounts), skip income/transfers for trend analysis
         let category = classify_transaction(&txn.description, rules);
-        if category == SpendingCategory::Income || category == SpendingCategory::Transfer {
+        if category == "income" || category == "transfer" {
             continue;
         }
 
@@ -167,7 +167,7 @@ pub fn compute_trends(
         .collect();
 
     // Build per-category trends
-    let mut categories_map: HashMap<SpendingCategory, Vec<MonthlyTotal>> = HashMap::new();
+    let mut categories_map: HashMap<String, Vec<MonthlyTotal>> = HashMap::new();
     for ((period, category), (total, count)) in &by_period_category {
         categories_map
             .entry(category.clone())
@@ -194,7 +194,7 @@ pub fn compute_trends(
             let (direction, change_percent) = compute_direction(&month_data);
 
             CategoryTrend {
-                label: category.to_string(),
+                label: category_label(&category),
                 category,
                 months: month_data,
                 monthly_average,

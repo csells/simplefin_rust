@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use simplefin::spending::{
-    classify_transaction, compute_spending, default_spending_patterns, SpendingCategory,
+    classify_transaction, compute_spending, default_spending_patterns, OTHER_CATEGORY,
     SpendingRule,
 };
 use simplefin::storage::TransactionWithContext;
@@ -30,7 +30,7 @@ fn defaults() -> Vec<SpendingRule> {
 fn classifies_restaurant_transaction() {
     assert_eq!(
         classify_transaction("CHIPOTLE MEXICAN GRILL #1234", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -38,7 +38,7 @@ fn classifies_restaurant_transaction() {
 fn classifies_grocery_transaction() {
     assert_eq!(
         classify_transaction("WHOLE FOODS MKT #10234", &defaults()),
-        SpendingCategory::Groceries
+        "groceries"
     );
 }
 
@@ -46,7 +46,7 @@ fn classifies_grocery_transaction() {
 fn classifies_utility_transaction() {
     assert_eq!(
         classify_transaction("VERIZON WIRELESS PAYMENT", &defaults()),
-        SpendingCategory::Utilities
+        "utilities"
     );
 }
 
@@ -54,7 +54,7 @@ fn classifies_utility_transaction() {
 fn classifies_income_transaction() {
     assert_eq!(
         classify_transaction("ACME CORP DIRECT DEP PAYROLL", &defaults()),
-        SpendingCategory::Income
+        "income"
     );
 }
 
@@ -63,12 +63,12 @@ fn custom_rule_overrides_builtin() {
     // Custom rule placed before defaults
     let mut rules = vec![SpendingRule {
         pattern: "ACME".to_string(),
-        category: SpendingCategory::Transfer,
+        category: "transfer".to_string(),
     }];
     rules.extend(defaults());
     assert_eq!(
         classify_transaction("ACME CORP DIRECT DEP PAYROLL", &rules),
-        SpendingCategory::Transfer
+        "transfer"
     );
 }
 
@@ -76,7 +76,7 @@ fn custom_rule_overrides_builtin() {
 fn unknown_transaction_classified_as_other() {
     assert_eq!(
         classify_transaction("RANDOM VENDOR XYZ", &defaults()),
-        SpendingCategory::Other
+        OTHER_CATEGORY
     );
 }
 
@@ -112,7 +112,7 @@ fn spending_counts_transactions() {
     let restaurants = summary
         .categories
         .iter()
-        .find(|c| c.category == SpendingCategory::Restaurants)
+        .find(|c| c.category == "restaurants")
         .unwrap();
     assert_eq!(restaurants.transaction_count, 2);
     assert_eq!(restaurants.total, dec!(-20.00));
@@ -124,7 +124,7 @@ fn spending_counts_transactions() {
 fn classifies_housing_transaction() {
     assert_eq!(
         classify_transaction("HOA DUES PAYMENT", &defaults()),
-        SpendingCategory::Housing
+        "housing"
     );
 }
 
@@ -132,7 +132,7 @@ fn classifies_housing_transaction() {
 fn classifies_rent_as_housing() {
     assert_eq!(
         classify_transaction("RENT PAYMENT APT 4B", &defaults()),
-        SpendingCategory::Housing
+        "housing"
     );
 }
 
@@ -140,7 +140,7 @@ fn classifies_rent_as_housing() {
 fn classifies_insurance_transaction() {
     assert_eq!(
         classify_transaction("GEICO AUTO INSURANCE", &defaults()),
-        SpendingCategory::Insurance
+        "insurance"
     );
 }
 
@@ -148,7 +148,7 @@ fn classifies_insurance_transaction() {
 fn classifies_generic_insurance() {
     assert_eq!(
         classify_transaction("HOMEOWNERS INSURANCE PREMIUM", &defaults()),
-        SpendingCategory::Insurance
+        "insurance"
     );
 }
 
@@ -156,7 +156,7 @@ fn classifies_generic_insurance() {
 fn classifies_subscription_transaction() {
     assert_eq!(
         classify_transaction("ADOBE CREATIVE CLOUD", &defaults()),
-        SpendingCategory::Subscriptions
+        "subscriptions"
     );
 }
 
@@ -164,7 +164,7 @@ fn classifies_subscription_transaction() {
 fn classifies_membership_as_subscription() {
     assert_eq!(
         classify_transaction("AAA MEMBERSHIP RENEWAL", &defaults()),
-        SpendingCategory::Subscriptions
+        "subscriptions"
     );
 }
 
@@ -174,7 +174,7 @@ fn classifies_membership_as_subscription() {
 fn classifies_coffee_as_restaurant() {
     assert_eq!(
         classify_transaction("LOCAL COFFEE HOUSE", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -182,7 +182,7 @@ fn classifies_coffee_as_restaurant() {
 fn classifies_bakery_as_restaurant() {
     assert_eq!(
         classify_transaction("PORTLAND BAKERY #42", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -190,7 +190,7 @@ fn classifies_bakery_as_restaurant() {
 fn classifies_aldi_as_groceries() {
     assert_eq!(
         classify_transaction("ALDI #1234", &defaults()),
-        SpendingCategory::Groceries
+        "groceries"
     );
 }
 
@@ -198,7 +198,7 @@ fn classifies_aldi_as_groceries() {
 fn classifies_interest_as_income() {
     assert_eq!(
         classify_transaction("INTEREST EARNED SAVINGS", &defaults()),
-        SpendingCategory::Income
+        "income"
     );
 }
 
@@ -206,7 +206,7 @@ fn classifies_interest_as_income() {
 fn classifies_dividend_as_income() {
     assert_eq!(
         classify_transaction("DIVIDEND PAYMENT", &defaults()),
-        SpendingCategory::Income
+        "income"
     );
 }
 
@@ -214,7 +214,7 @@ fn classifies_dividend_as_income() {
 fn classifies_gym_as_entertainment() {
     assert_eq!(
         classify_transaction("24 HOUR FITNESS", &defaults()),
-        SpendingCategory::Entertainment
+        "entertainment"
     );
 }
 
@@ -222,7 +222,7 @@ fn classifies_gym_as_entertainment() {
 fn classifies_dentist_as_healthcare() {
     assert_eq!(
         classify_transaction("DR SMITH DENTIST", &defaults()),
-        SpendingCategory::Healthcare
+        "healthcare"
     );
 }
 
@@ -230,7 +230,7 @@ fn classifies_dentist_as_healthcare() {
 fn classifies_taxi_as_transportation() {
     assert_eq!(
         classify_transaction("YELLOW TAXI NYC", &defaults()),
-        SpendingCategory::Transportation
+        "transportation"
     );
 }
 
@@ -238,7 +238,7 @@ fn classifies_taxi_as_transportation() {
 fn classifies_home_depot_as_shopping() {
     assert_eq!(
         classify_transaction("HOME DEPOT #4521", &defaults()),
-        SpendingCategory::Shopping
+        "shopping"
     );
 }
 
@@ -246,7 +246,7 @@ fn classifies_home_depot_as_shopping() {
 fn classifies_atm_as_transfer() {
     assert_eq!(
         classify_transaction("ATM WITHDRAWAL", &defaults()),
-        SpendingCategory::Transfer
+        "transfer"
     );
 }
 
@@ -256,7 +256,7 @@ fn classifies_atm_as_transfer() {
 fn classifies_college_as_education() {
     assert_eq!(
         classify_transaction("PORTLAND COMM COLLEGE", &defaults()),
-        SpendingCategory::Education
+        "education"
     );
 }
 
@@ -264,7 +264,7 @@ fn classifies_college_as_education() {
 fn classifies_coursera_as_education() {
     assert_eq!(
         classify_transaction("COURSERA.ORG SUBSCRIPTION", &defaults()),
-        SpendingCategory::Education
+        "education"
     );
 }
 
@@ -272,7 +272,7 @@ fn classifies_coursera_as_education() {
 fn classifies_barber_as_personal_care() {
     assert_eq!(
         classify_transaction("THE BARBERS DOWNTOWN", &defaults()),
-        SpendingCategory::PersonalCare
+        "personal_care"
     );
 }
 
@@ -280,7 +280,7 @@ fn classifies_barber_as_personal_care() {
 fn classifies_beauty_as_personal_care() {
     assert_eq!(
         classify_transaction("BLISS AND BEAUTY LLC", &defaults()),
-        SpendingCategory::PersonalCare
+        "personal_care"
     );
 }
 
@@ -288,7 +288,7 @@ fn classifies_beauty_as_personal_care() {
 fn classifies_petco_as_pets() {
     assert_eq!(
         classify_transaction("PETCO 1259", &defaults()),
-        SpendingCategory::Pets
+        "pets"
     );
 }
 
@@ -296,7 +296,7 @@ fn classifies_petco_as_pets() {
 fn classifies_veterinary_as_pets() {
     assert_eq!(
         classify_transaction("WILLOWBROOK VETERINARY", &defaults()),
-        SpendingCategory::Pets
+        "pets"
     );
 }
 
@@ -306,7 +306,7 @@ fn classifies_veterinary_as_pets() {
 fn classifies_buffet_as_restaurant() {
     assert_eq!(
         classify_transaction("MIZUMI BUFFET 650000", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -314,7 +314,7 @@ fn classifies_buffet_as_restaurant() {
 fn classifies_donut_as_restaurant() {
     assert_eq!(
         classify_transaction("SESAME DONUTS TIGARD", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -322,7 +322,7 @@ fn classifies_donut_as_restaurant() {
 fn classifies_pancake_as_restaurant() {
     assert_eq!(
         classify_transaction("PIG 'N PANCAKE-NEWPORT", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -330,7 +330,7 @@ fn classifies_pancake_as_restaurant() {
 fn classifies_food_service_as_restaurant() {
     assert_eq!(
         classify_transaction("SYLVANIA FOOD SERVICE", &defaults()),
-        SpendingCategory::Restaurants
+        "restaurants"
     );
 }
 
@@ -338,7 +338,7 @@ fn classifies_food_service_as_restaurant() {
 fn classifies_cinema_as_entertainment() {
     assert_eq!(
         classify_transaction("CINEMARK PORTLAND OR", &defaults()),
-        SpendingCategory::Entertainment
+        "entertainment"
     );
 }
 
@@ -346,7 +346,7 @@ fn classifies_cinema_as_entertainment() {
 fn classifies_regal_theater_as_entertainment() {
     assert_eq!(
         classify_transaction("REGAL BRIDGEPORT 0652", &defaults()),
-        SpendingCategory::Entertainment
+        "entertainment"
     );
 }
 
@@ -354,7 +354,7 @@ fn classifies_regal_theater_as_entertainment() {
 fn classifies_casino_as_entertainment() {
     assert_eq!(
         classify_transaction("LUCKY EAGLE CASINO", &defaults()),
-        SpendingCategory::Entertainment
+        "entertainment"
     );
 }
 
@@ -362,7 +362,7 @@ fn classifies_casino_as_entertainment() {
 fn classifies_apple_bill_as_subscription() {
     assert_eq!(
         classify_transaction("Ext Credit Card Debit APPLE.COM/BILL CUPERTINO CA", &defaults()),
-        SpendingCategory::Subscriptions
+        "subscriptions"
     );
 }
 
@@ -373,7 +373,7 @@ fn classifies_google_service_as_subscription() {
             "Ext Credit Card Debit GOOGLE *GOOGLE ONE 650-253-0000 CA",
             &defaults()
         ),
-        SpendingCategory::Subscriptions
+        "subscriptions"
     );
 }
 
@@ -381,7 +381,7 @@ fn classifies_google_service_as_subscription() {
 fn classifies_hotel_as_transportation() {
     assert_eq!(
         classify_transaction("WHALER MOTEL NEWPORT OR", &defaults()),
-        SpendingCategory::Transportation
+        "transportation"
     );
 }
 
@@ -390,7 +390,7 @@ fn classifies_truncated_transit_as_transportation() {
     // Bank truncated "TRANSIT" to "TRANSI"
     assert_eq!(
         classify_transaction("SALEM AREA MASS TRANSI", &defaults()),
-        SpendingCategory::Transportation
+        "transportation"
     );
 }
 
@@ -398,7 +398,7 @@ fn classifies_truncated_transit_as_transportation() {
 fn classifies_disposal_as_utilities() {
     assert_eq!(
         classify_transaction("PRIDE DISPOSAL 13980", &defaults()),
-        SpendingCategory::Utilities
+        "utilities"
     );
 }
 
@@ -406,7 +406,7 @@ fn classifies_disposal_as_utilities() {
 fn classifies_general_electric_as_utilities() {
     assert_eq!(
         classify_transaction("PORTLAND GENERAL ELECT", &defaults()),
-        SpendingCategory::Utilities
+        "utilities"
     );
 }
 
@@ -414,7 +414,7 @@ fn classifies_general_electric_as_utilities() {
 fn classifies_check_as_transfer() {
     assert_eq!(
         classify_transaction("Check #1575", &defaults()),
-        SpendingCategory::Transfer
+        "transfer"
     );
 }
 
@@ -422,12 +422,12 @@ fn classifies_check_as_transfer() {
 fn custom_rules_still_override_expanded_builtins() {
     let mut rules = vec![SpendingRule {
         pattern: "STARBUCKS".to_string(),
-        category: SpendingCategory::Other,
+        category: "other".to_string(),
     }];
     rules.extend(defaults());
     assert_eq!(
         classify_transaction("STARBUCKS #1234", &rules),
-        SpendingCategory::Other
+        "other"
     );
 }
 
@@ -438,7 +438,7 @@ fn empty_rules_classifies_everything_as_other() {
     // With no rules at all, everything should be Other
     assert_eq!(
         classify_transaction("CHIPOTLE", &[]),
-        SpendingCategory::Other
+        OTHER_CATEGORY
     );
 }
 
@@ -462,18 +462,33 @@ fn spending_reports_unclassified_descriptions() {
 fn pipe_separated_patterns_work() {
     let rules = vec![SpendingRule {
         pattern: "foo|bar|baz".to_string(),
-        category: SpendingCategory::Entertainment,
+        category: "entertainment".to_string(),
     }];
     assert_eq!(
         classify_transaction("SOMETHING FOO HERE", &rules),
-        SpendingCategory::Entertainment
+        "entertainment"
     );
     assert_eq!(
         classify_transaction("THE BAR", &rules),
-        SpendingCategory::Entertainment
+        "entertainment"
     );
     assert_eq!(
         classify_transaction("NO MATCH", &rules),
-        SpendingCategory::Other
+        OTHER_CATEGORY
+    );
+}
+
+// --- User-defined category test ---
+
+#[test]
+fn user_defined_category_works() {
+    // Any string can be a category — no enum required
+    let rules = vec![SpendingRule {
+        pattern: "red cross|salvation army".to_string(),
+        category: "donations".to_string(),
+    }];
+    assert_eq!(
+        classify_transaction("RED CROSS DONATION", &rules),
+        "donations"
     );
 }

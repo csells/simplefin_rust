@@ -5,49 +5,27 @@ use std::collections::HashMap;
 
 use crate::storage::TransactionWithContext;
 
-/// Spending category for transaction classification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SpendingCategory {
-    Restaurants,
-    Groceries,
-    Utilities,
-    Transportation,
-    Shopping,
-    Entertainment,
-    Healthcare,
-    Housing,
-    Insurance,
-    Subscriptions,
-    Education,
-    PersonalCare,
-    Pets,
-    Income,
-    Transfer,
-    Other,
-}
+/// The fallback category name for unclassified transactions.
+pub const OTHER_CATEGORY: &str = "other";
 
-impl std::fmt::Display for SpendingCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Restaurants => write!(f, "Restaurants"),
-            Self::Groceries => write!(f, "Groceries"),
-            Self::Utilities => write!(f, "Utilities"),
-            Self::Transportation => write!(f, "Transportation"),
-            Self::Shopping => write!(f, "Shopping"),
-            Self::Entertainment => write!(f, "Entertainment"),
-            Self::Healthcare => write!(f, "Healthcare"),
-            Self::Housing => write!(f, "Housing"),
-            Self::Insurance => write!(f, "Insurance"),
-            Self::Subscriptions => write!(f, "Subscriptions"),
-            Self::Education => write!(f, "Education"),
-            Self::PersonalCare => write!(f, "Personal Care"),
-            Self::Pets => write!(f, "Pets"),
-            Self::Income => write!(f, "Income"),
-            Self::Transfer => write!(f, "Transfer"),
-            Self::Other => write!(f, "Other"),
-        }
-    }
+/// Convert a snake_case category name to a human-readable label.
+/// e.g. "personal_care" → "Personal Care", "restaurants" → "Restaurants".
+pub fn category_label(category: &str) -> String {
+    category
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let mut s = c.to_uppercase().to_string();
+                    s.extend(chars);
+                    s
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A rule for classifying transactions into spending categories.
@@ -56,13 +34,13 @@ impl std::fmt::Display for SpendingCategory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpendingRule {
     pub pattern: String,
-    pub category: SpendingCategory,
+    pub category: String,
 }
 
 /// Per-category spending total.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SpendingTotal {
-    pub category: SpendingCategory,
+    pub category: String,
     pub label: String,
     pub total: Decimal,
     pub transaction_count: usize,
@@ -95,7 +73,7 @@ pub struct SpendingSummary {
 /// Patterns support `|` separated keywords. Order matters — more specific
 /// categories should come before broad ones (e.g. "pet" before "store").
 pub fn default_spending_patterns() -> Vec<SpendingRule> {
-    let raw: &[(&str, SpendingCategory)] = &[
+    let raw: &[(&str, &str)] = &[
         // Transfer — ACH/wire/Zelle are unambiguous.
         // "payment" omitted (too broad). "wire " has trailing space to avoid "wireless".
         (
@@ -103,44 +81,44 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |crypto|coinbase|withdrawal|atm|check #|epayment|edeposit\
             |mobile payment|ach debit|ach credit|ach pmt\
             |payment - thank",
-            SpendingCategory::Transfer,
+            "transfer",
         ),
         // Income — payroll, deposits, dividends, refunds
         (
             "payroll|direct dep|direct deposit|salary|wage|deposit from employer\
             |interest earned|interest charge|dividend|refund|reimburs|cashback\
             |cash back|reward redemp|tax refund",
-            SpendingCategory::Income,
+            "income",
         ),
         // Pets — before shopping so pet stores match here, not "store"
         (
             "pet |pets |petco|petsmart|pet supply|veterinar|vet |animal hospital\
             |animal clinic|groomer|dog |cat ",
-            SpendingCategory::Pets,
+            "pets",
         ),
         // Housing — rent, HOA, property, maintenance
         (
             "rent |lease |hoa|property tax|plumb|roof|hvac|landscap\
             |lawn|pest control|handyman|maintenance fee|condo fee|apartment",
-            SpendingCategory::Housing,
+            "housing",
         ),
         // Insurance — all types
         (
             "insurance|insur |geico|state farm|allstate|progressive|usaa\
             |liberty mutual|farmers|nationwide",
-            SpendingCategory::Insurance,
+            "insurance",
         ),
         // Education — tuition, courses, schools
         (
             "college|university|tuition|coursera|udemy|school|education\
             |academic|seminary|learning",
-            SpendingCategory::Education,
+            "education",
         ),
         // Personal Care — barber, beauty, salon, spa, wellness
         (
             "barber|beauty|salon|spa |hair |nail |wax |massage|wellness\
             |wellbeing|cosmetic|skincare",
-            SpendingCategory::PersonalCare,
+            "personal_care",
         ),
         // Healthcare — before shopping so CVS/Walgreens match here
         (
@@ -149,7 +127,7 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |therapist|counseling|chiropractic|physical therapy|laboratory\
             |diagnostic|prescription|kaiser|blue cross|aetna|cigna\
             |united health|family ph",
-            SpendingCategory::Healthcare,
+            "healthcare",
         ),
         // Utilities — gas/electric/water/internet/phone/waste
         (
@@ -157,14 +135,14 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |xfinity|t-mobile|spectrum|cox|frontier|broadband|fiber|wireless bill\
             |waste|garbage|trash|recycling|pgande|utility|disposal|natural gas\
             |nw natural|general elect|boost mobile|google fi|mint mobile|ziply",
-            SpendingCategory::Utilities,
+            "utilities",
         ),
         // Groceries — before restaurants so grocery stores match here
         (
             "grocery|whole foods|trader joe|safeway|kroger|costco|fred meyer\
             |winco|albertson|supermarket|produce|butcher|food co-op\
             |aldi|lidl|sprouts|publix|wegmans|heb |meijer|piggly|food mart",
-            SpendingCategory::Groceries,
+            "groceries",
         ),
         // Restaurants — broad food/dining/drink patterns
         (
@@ -178,7 +156,7 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |popeye|domino|red robin|panera|olive garden|applebee|ihop\
             |denny|wendy|five guys|panda express|wingstop|crumbl|hot cake\
             |cake |dutch bros|benihana|mcmenamins",
-            SpendingCategory::Restaurants,
+            "restaurants",
         ),
         // Transportation — fuel, rideshare, transit, travel, lodging
         (
@@ -186,7 +164,7 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |taxi|cab |train|airline|flight|amtrak|metro|bus |toll|ev charg\
             |bp |arco|exxon|wawa|pilot|southwest|delta air|united air|jetblue\
             |alaska air|hotel|motel|airbnb|lodge|resort|hop fares|hop fast",
-            SpendingCategory::Transportation,
+            "transportation",
         ),
         // Subscriptions — recurring digital/physical services
         (
@@ -194,7 +172,7 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |icloud|dropbox|1password|lastpass|adobe|microsoft 365|office 365\
             |google storage|chatgpt|openai|github|notion|apple.com/bill\
             |google *|prime video|new york times|nytimes|simplicity.com",
-            SpendingCategory::Subscriptions,
+            "subscriptions",
         ),
         // Entertainment — media, fitness, recreation, gaming, venues
         (
@@ -203,7 +181,7 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |arcade|apple music|audible|kindle|twitch|peacock|paramount|hbo\
             |cinema|regal |amc |casino|expo|recreation|park an|wizards\
             |moviepass|vending",
-            SpendingCategory::Entertainment,
+            "entertainment",
         ),
         // Shopping — broadest catch-all for retail (checked last before Other)
         (
@@ -211,14 +189,14 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
             |furniture|home depot|lowes|ikea|hardware|office depot|staples\
             |michaels|hobby|craft|book|store|shop|purchase|jewel|marshall\
             |tj maxx|ross |nordstrom|gap |old navy|joann",
-            SpendingCategory::Shopping,
+            "shopping",
         ),
     ];
 
     raw.iter()
         .map(|(pattern, category)| SpendingRule {
             pattern: pattern.to_string(),
-            category: category.clone(),
+            category: category.to_string(),
         })
         .collect()
 }
@@ -230,7 +208,7 @@ pub fn default_spending_patterns() -> Vec<SpendingRule> {
 ///
 /// The caller is responsible for assembling rules in priority order. Typically:
 /// user-specific rules first, then default patterns from `spending_patterns.json`.
-pub fn classify_transaction(description: &str, rules: &[SpendingRule]) -> SpendingCategory {
+pub fn classify_transaction(description: &str, rules: &[SpendingRule]) -> String {
     let lower = description.to_lowercase();
 
     for rule in rules {
@@ -244,7 +222,7 @@ pub fn classify_transaction(description: &str, rules: &[SpendingRule]) -> Spendi
         }
     }
 
-    SpendingCategory::Other
+    OTHER_CATEGORY.to_string()
 }
 
 /// Compute spending summary from transactions.
@@ -256,7 +234,7 @@ pub fn compute_spending(
     transactions: &[TransactionWithContext],
     rules: &[SpendingRule],
 ) -> SpendingSummary {
-    let mut by_category: HashMap<SpendingCategory, (Decimal, usize)> = HashMap::new();
+    let mut by_category: HashMap<String, (Decimal, usize)> = HashMap::new();
     let mut total_spending = Decimal::ZERO;
     let mut total_income = Decimal::ZERO;
     let mut unclassified: Vec<UnclassifiedTransaction> = Vec::new();
@@ -268,7 +246,7 @@ pub fn compute_spending(
 
         let category = classify_transaction(&txn.description, rules);
 
-        if category == SpendingCategory::Other
+        if category == OTHER_CATEGORY
             && !unclassified.iter().any(|u| u.description == txn.description)
         {
             unclassified.push(UnclassifiedTransaction {
@@ -291,7 +269,7 @@ pub fn compute_spending(
     let mut categories: Vec<SpendingTotal> = by_category
         .into_iter()
         .map(|(cat, (total, count))| SpendingTotal {
-            label: cat.to_string(),
+            label: category_label(&cat),
             category: cat,
             total,
             transaction_count: count,

@@ -255,7 +255,7 @@ The CLI has the following subcommands:
 Five categories defined as a Rust enum: Cash, Investments, OtherAssets, CreditCards, Loans. Each has an asset/liability designation used for net worth computation. Future: user-defined categories (see `specs/futures.md` Problem 1).
 
 ### 13.3 Spending Categories
-Sixteen categories defined as a Rust enum: Restaurants, Groceries, Utilities, Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance, Subscriptions, Education, PersonalCare, Pets, Income, Transfer, Other. Future: user-defined categories (see `specs/futures.md` Problem 3).
+Spending categories are **data-driven strings**, not a Rust enum. Categories are implicitly defined by whatever appears in `spending_patterns.json` — adding a rule with `--category donations` creates a new category with zero code changes. The library ships 16 default categories as seed data (Restaurants, Groceries, Utilities, Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance, Subscriptions, Education, Personal Care, Pets, Income, Transfer, Other). `category_label()` converts snake_case names to display labels. `OTHER_CATEGORY` ("other") is the fallback for unmatched transactions.
 
 ### 13.4 Anomaly Detection
 Compares current vs previous account balances during collection, flags: balances dropped to zero, large changes (>20%), disappeared accounts, new accounts. Warnings persisted to `warnings.json`.

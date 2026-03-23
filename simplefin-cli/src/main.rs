@@ -1079,7 +1079,8 @@ fn handle_spending_rules(
         let cat_str = category.ok_or_else(|| {
             SimplefinError::InvalidArgument("--category is required when adding a pattern".into())
         })?;
-        let cat = parse_spending_category(cat_str)?;
+        // Normalize: lowercase, spaces to underscores
+        let cat = cat_str.to_lowercase().replace(' ', "_");
         let mut patterns = storage.get_spending_patterns()?;
         patterns.insert(
             0,
@@ -1137,30 +1138,6 @@ fn handle_spending_rules(
         storage_path: Some(storage_path.to_string()),
         kind: CommandKind::Message,
     })
-}
-
-fn parse_spending_category(s: &str) -> simplefin::Result<simplefin::SpendingCategory> {
-    match s.to_lowercase().replace(' ', "_").as_str() {
-        "restaurants" => Ok(simplefin::SpendingCategory::Restaurants),
-        "groceries" => Ok(simplefin::SpendingCategory::Groceries),
-        "utilities" => Ok(simplefin::SpendingCategory::Utilities),
-        "transportation" => Ok(simplefin::SpendingCategory::Transportation),
-        "shopping" => Ok(simplefin::SpendingCategory::Shopping),
-        "entertainment" => Ok(simplefin::SpendingCategory::Entertainment),
-        "healthcare" => Ok(simplefin::SpendingCategory::Healthcare),
-        "housing" => Ok(simplefin::SpendingCategory::Housing),
-        "insurance" => Ok(simplefin::SpendingCategory::Insurance),
-        "subscriptions" => Ok(simplefin::SpendingCategory::Subscriptions),
-        "education" => Ok(simplefin::SpendingCategory::Education),
-        "personal_care" | "personalcare" => Ok(simplefin::SpendingCategory::PersonalCare),
-        "pets" => Ok(simplefin::SpendingCategory::Pets),
-        "income" => Ok(simplefin::SpendingCategory::Income),
-        "transfer" => Ok(simplefin::SpendingCategory::Transfer),
-        "other" => Ok(simplefin::SpendingCategory::Other),
-        _ => Err(SimplefinError::InvalidArgument(format!(
-            "unknown spending category \"{s}\". Valid: restaurants, groceries, utilities, transportation, shopping, entertainment, healthcare, housing, insurance, subscriptions, education, personal_care, pets, income, transfer, other"
-        ))),
-    }
 }
 
 fn handle_recurring(

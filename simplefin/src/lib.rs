@@ -25,8 +25,8 @@ pub use error::{Result, SimplefinError};
 pub use models::{Account, AccountSet, BridgeInfo, Organization, Transaction};
 pub use recurring::{RecurringExpense, RecurringSummary, detect_recurring};
 pub use spending::{
-    SpendingCategory, SpendingRule, SpendingSummary, SpendingTotal, UnclassifiedTransaction,
-    classify_transaction, compute_spending, default_spending_patterns,
+    OTHER_CATEGORY, SpendingRule, SpendingSummary, SpendingTotal, UnclassifiedTransaction,
+    category_label, classify_transaction, compute_spending, default_spending_patterns,
 };
 pub use trends::{CategoryTrend, MonthlyTotal, TrendDirection, TrendsSummary, compute_trends};
 pub use storage::{

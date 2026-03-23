@@ -72,25 +72,15 @@ already implement this pattern -- they just aren't the primary path. The shift
 is making rules-from-config the *only* path, with presets as the starting
 point. The hardcoded `classify_account()` function goes away entirely.
 
-## Problem 3: US-Specific Spending Keywords
+## ~~Problem 3: US-Specific Spending Keywords~~ — DONE
 
-**Current state:** `BUILTIN_RULES` in `spending.rs` contains 77+ vendor
-keywords, all US-specific: Chipotle, Trader Joe's, Fred Meyer, WinCo,
-Albertson's, PG&E, TriMet (Portland transit), CVS, Walgreens. Some are
-regional to the Pacific Northwest.
-
-**Impact:** A user in Germany, Japan, or even New York gets almost zero
-keyword matches -- everything falls to "Other". The spending analysis is
-effectively broken for anyone who doesn't shop at the author's stores.
-
-**Future direction:** Same preset approach as account classification. Move
-all spending keywords to locale-specific preset files. The `SpendingCategory`
-enum has the same problem as `AccountCategory` -- it should also be
-user-defined. Ship US defaults but make them replaceable.
-
-**Design consideration:** Spending categories are simpler than account
-categories (no asset/liability distinction), so this could be tackled first
-as a warm-up for the account category refactor.
+**Resolved.** Spending categories are now data-driven strings, not a Rust
+enum. Categories are implicitly defined by whatever appears in
+`spending_patterns.json` — adding `--category donations` via the CLI creates
+a new category with zero code changes. Default patterns are seeded on first
+use and fully user-editable. The `spending-rules` CLI subcommand manages
+patterns (add/remove/list/reset). Locale-specific presets remain a future
+enhancement for the default keyword lists themselves.
 
 ## Problem 4: Currency Handling
 

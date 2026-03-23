@@ -18,7 +18,7 @@ This is a Cargo workspace mono-repo with two first-class crates:
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (must pass with zero warnings)
-cargo test           # Run all tests (277 currently)
+cargo test           # Run all tests (278 currently)
 cargo run -p simplefin-cli -- --help  # Run the CLI
 ```
 
@@ -43,7 +43,7 @@ Key patterns:
 - `storage/` — `Storage` trait for persisting collected data, plus `JsonStorage` (JSON-file-based default implementation). Filter types: `OrgFilter`, `AccountFilter`, `TransactionFilter`. `UnifiedAccount` merges SimpleFIN and manual accounts into one type. `unify_accounts()` combines both sources. Balance snapshots deduped when unchanged. `DataConfig` stores per-user settings (exclusion patterns, excluded account IDs, classification overrides) in the data directory. `ManualAccount` includes `refresh_days` for staleness checking. `StaleAccount` reports which manual accounts need balance updates. `WarningRecord` persists anomalies and bridge messages from collection. `StorageStatus` and `compute_status()` provide a quick snapshot of storage state.
 - `analysis.rs` — Financial analysis: `classify_account()` (five categories), `compute_net_worth()`/`compute_net_worth_detail()` and `compute_changes()` accept `&DataConfig` for exclusions, classification overrides/rules, and display names. `compute_net_worth_history()` reconstructs net worth at historical timestamps. `classify_for_display()` returns both heuristic and effective classifications with confidence flags. Classification priority: ID override > classification rules > heuristic classifier.
 - `anomaly.rs` — Anomaly detection: `detect_anomalies()` compares current vs previous account balances, flagging balances dropped to zero, large changes (>20%), disappeared accounts, and new accounts.
-- `spending.rs` — Spending analysis: `classify_transaction()` and `compute_spending()` categorize transactions into spending categories (Restaurants, Groceries, Utilities, Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance, Subscriptions, Education, Personal Care, Pets, Income, Transfer) using data-driven keyword patterns stored in `spending_patterns.json` in the data directory. `default_spending_patterns()` provides the initial seed. Patterns support `|` separated keywords. User rules from `config.json` take priority over patterns.
+- `spending.rs` — Spending analysis: `classify_transaction()` and `compute_spending()` categorize transactions into spending categories using data-driven keyword patterns stored in `spending_patterns.json` in the data directory. Categories are plain strings, not an enum — users create new categories (e.g., "donations") simply by adding a rule via the CLI. `default_spending_patterns()` provides the initial seed with 16 default categories. `category_label()` converts snake_case to display names. `OTHER_CATEGORY` ("other") is the fallback for unmatched transactions. Patterns support `|` separated keywords. User rules from `config.json` take priority over patterns.
 - `recurring.rs` — Recurring expense detection: `detect_recurring()` groups transactions by normalized merchant name, detects regular intervals (weekly, monthly, quarterly, annual), and estimates monthly cost. Includes `normalize_merchant()` for stripping POS prefixes and trailing IDs.
 - `trends.rs` — Spending trend analysis: `compute_trends()` computes month-over-month spending by category, calculates monthly averages, and detects trend direction (up, down, stable) by comparing first-half vs second-half averages.
 - `error.rs` — Single `SimplefinError` enum with variants: `InvalidSetupToken`, `DataFormat`, `Api`, `Http`, `InvalidArgument`, `Storage`.
@@ -84,7 +84,7 @@ The heuristic classifier currently contains US-specific institution keywords (Va
 
 **What's intentionally in code (schema, not data):**
 - `AccountCategory` enum (Cash, Investments, OtherAssets, CreditCards, Loans) — defines the classification schema
-- `SpendingCategory` enum (16 categories) — defines the spending schema
+- Spending categories are **data-driven strings**, not an enum — categories are defined by whatever appears in `spending_patterns.json`. Adding `--category donations` via the CLI creates a new category with zero code changes.
 - Algorithmic constants (anomaly 20% threshold, trend 10% threshold, recurring interval tolerances) — documented in `specs/futures.md` as future config targets
 
 **What's in the user's data directory (data, not schema):**

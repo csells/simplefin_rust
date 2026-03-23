@@ -188,6 +188,16 @@ This saves the pattern to `spending_patterns.json` in the data directory so
 future runs classify it correctly. Over time, the "Other" bucket shrinks as
 the user teaches the system about their specific merchants.
 
+**Categories are data-driven** — any string is a valid category. To create
+a new category (e.g., "donations"), just add a rule with that category name:
+
+```bash
+cargo run -p simplefin-cli -- spending-rules --storage "$SIMPLEFIN_DATA" \
+  --add "red cross|salvation army|united way" --category donations
+```
+
+No code changes needed. The new category appears in spending output automatically.
+
 ### Manage spending patterns
 
 Spending classification uses data-driven patterns, not hardcoded rules. Patterns
