@@ -148,6 +148,25 @@ pub fn unify_accounts(
     unified
 }
 
+/// Which field a classification rule matches against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassificationField {
+    Name,
+    Org,
+}
+
+/// A user-defined classification rule checked before the heuristic classifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassificationRule {
+    /// Substring to match (case-insensitive).
+    pub pattern: String,
+    /// Which field to match against.
+    pub field: ClassificationField,
+    /// Target category when the pattern matches.
+    pub category: AccountCategory,
+}
+
 /// Per-user configuration stored alongside financial data.
 ///
 /// Lives in the data directory (not the repo) so user-specific settings
@@ -160,9 +179,37 @@ pub struct DataConfig {
     pub excluded_account_patterns: Vec<String>,
 
     /// Override the heuristic classification for specific account IDs.
-    /// Example: `{"ACT-abc123": "investments"}` to force an account into a category.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub classification_overrides: HashMap<String, AccountCategory>,
+
+    /// User-defined classification rules checked before the heuristic classifier.
+    /// Rules are checked in order; first match wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classification_rules: Vec<ClassificationRule>,
+
+    /// Friendly display names for accounts, keyed by account ID.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub display_names: HashMap<String, String>,
+
+    /// User-defined rules for classifying transactions into spending categories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spending_rules: Vec<crate::spending::SpendingRule>,
+}
+
+/// Orphaned data found during cleanup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanedData {
+    pub account_id: String,
+    pub data_type: OrphanedDataType,
+    pub path: String,
+}
+
+/// Type of orphaned data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrphanedDataType {
+    BalanceHistory,
+    Transactions,
 }
 
 /// A manual account whose balance is stale and needs updating.
@@ -223,4 +270,10 @@ pub trait Storage {
 
     /// Return manual accounts whose balance is stale based on their refresh_days.
     fn get_stale_accounts(&self, now: i64) -> Result<Vec<StaleAccount>>;
+
+    /// Find orphaned data (balance history/transactions for accounts that no longer exist).
+    fn find_orphaned_data(&self) -> Result<Vec<OrphanedData>>;
+
+    /// Remove orphaned data files.
+    fn remove_orphaned_data(&self, orphans: &[OrphanedData]) -> Result<()>;
 }

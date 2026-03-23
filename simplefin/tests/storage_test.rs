@@ -897,3 +897,96 @@ fn stale_respects_per_account_refresh_days() {
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0].id, "daily");
 }
+
+// === Cleanup / orphaned data ===
+
+#[test]
+fn find_orphaned_data_empty_when_clean() {
+    let (_dir, storage) = open_temp_storage();
+    let orphans = storage.find_orphaned_data().unwrap();
+    assert!(orphans.is_empty());
+}
+
+#[test]
+fn find_orphaned_balance_history() {
+    let (_dir, mut storage) = open_temp_storage();
+    // Record balance for an account that doesn't exist in accounts.json or manual_accounts.json
+    storage
+        .record_balance("orphan-acc", 1700000000, Decimal::from_str("100").unwrap())
+        .unwrap();
+
+    let orphans = storage.find_orphaned_data().unwrap();
+    assert_eq!(orphans.len(), 1);
+    assert_eq!(orphans[0].account_id, "orphan-acc");
+}
+
+#[test]
+fn find_orphaned_transactions() {
+    let (_dir, mut storage) = open_temp_storage();
+    // Add transactions for an account that doesn't exist
+    storage
+        .upsert_transactions("orphan-acc", &[test_transaction("tx1", "50.00", 1700000000)])
+        .unwrap();
+
+    let orphans = storage.find_orphaned_data().unwrap();
+    assert_eq!(orphans.len(), 1);
+    assert_eq!(orphans[0].account_id, "orphan-acc");
+}
+
+#[test]
+fn known_accounts_not_orphaned() {
+    let (_dir, mut storage) = open_temp_storage();
+    let org = test_org("org1", "Bank");
+    let acc = test_account("acc1", "Checking", &org);
+    storage.upsert_organizations(&[org]).unwrap();
+    storage.upsert_accounts(&[acc]).unwrap();
+    storage
+        .record_balance("acc1", 1700000000, Decimal::from_str("100").unwrap())
+        .unwrap();
+    storage
+        .upsert_transactions("acc1", &[test_transaction("tx1", "50.00", 1700000000)])
+        .unwrap();
+
+    let orphans = storage.find_orphaned_data().unwrap();
+    assert!(orphans.is_empty());
+}
+
+#[test]
+fn manual_accounts_not_orphaned() {
+    let (_dir, mut storage) = open_temp_storage();
+    let manual = ManualAccount {
+        id: "manual-test".to_string(),
+        name: "Test".to_string(),
+        org_name: "Org".to_string(),
+        currency: "USD".to_string(),
+        refresh_days: 1,
+    };
+    storage.upsert_manual_accounts(&[manual]).unwrap();
+    storage
+        .record_balance(
+            "manual-test",
+            1700000000,
+            Decimal::from_str("100").unwrap(),
+        )
+        .unwrap();
+
+    let orphans = storage.find_orphaned_data().unwrap();
+    assert!(orphans.is_empty());
+}
+
+#[test]
+fn remove_orphaned_data_deletes_files() {
+    let (_dir, mut storage) = open_temp_storage();
+    storage
+        .record_balance("orphan-acc", 1700000000, Decimal::from_str("100").unwrap())
+        .unwrap();
+
+    let orphans = storage.find_orphaned_data().unwrap();
+    assert_eq!(orphans.len(), 1);
+
+    storage.remove_orphaned_data(&orphans).unwrap();
+
+    // Should be clean now
+    let orphans_after = storage.find_orphaned_data().unwrap();
+    assert!(orphans_after.is_empty());
+}

@@ -1,8 +1,9 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use simplefin::{
-    AccountCategory, AccountSource, BalanceSnapshot, DataConfig, UnifiedAccount, classify_account,
-    compute_changes, compute_net_worth,
+    AccountCategory, AccountSource, BalanceSnapshot, ClassificationField, ClassificationRule,
+    DataConfig, UnifiedAccount, classify_account, compute_changes, compute_net_worth,
+    compute_net_worth_detail, display_name_for,
 };
 
 fn default_config() -> DataConfig {
@@ -296,4 +297,153 @@ fn changes_excludes_configured_patterns() {
     // Only DOE should appear
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].account_name, "J. DOE (1234)");
+}
+
+// --- classification rules tests ---
+
+#[test]
+fn classification_rule_overrides_heuristic() {
+    let accounts = vec![make_account(
+        "acc1",
+        "Unknown Account",
+        "Unknown Org",
+        dec!(5000),
+    )];
+    let config = DataConfig {
+        classification_rules: vec![ClassificationRule {
+            pattern: "Unknown Account".to_string(),
+            field: ClassificationField::Name,
+            category: AccountCategory::Cash,
+        }],
+        ..Default::default()
+    };
+    let summary = compute_net_worth(&accounts, &config);
+    let cash = summary
+        .categories
+        .iter()
+        .find(|c| c.category == AccountCategory::Cash);
+    assert!(cash.is_some());
+    assert_eq!(cash.unwrap().total, dec!(5000));
+}
+
+#[test]
+fn classification_rule_matches_org() {
+    let accounts = vec![make_account(
+        "acc1",
+        "Generic Account",
+        "My Special Bank",
+        dec!(1000),
+    )];
+    let config = DataConfig {
+        classification_rules: vec![ClassificationRule {
+            pattern: "Special Bank".to_string(),
+            field: ClassificationField::Org,
+            category: AccountCategory::Investments,
+        }],
+        ..Default::default()
+    };
+    let summary = compute_net_worth(&accounts, &config);
+    let inv = summary
+        .categories
+        .iter()
+        .find(|c| c.category == AccountCategory::Investments);
+    assert!(inv.is_some());
+    assert_eq!(inv.unwrap().total, dec!(1000));
+}
+
+#[test]
+fn id_override_beats_classification_rule() {
+    let accounts = vec![make_account("acc1", "Checking", "Bank", dec!(2000))];
+    let mut overrides = std::collections::HashMap::new();
+    overrides.insert("acc1".to_string(), AccountCategory::Investments);
+    let config = DataConfig {
+        classification_overrides: overrides,
+        classification_rules: vec![ClassificationRule {
+            pattern: "Checking".to_string(),
+            field: ClassificationField::Name,
+            category: AccountCategory::Loans,
+        }],
+        ..Default::default()
+    };
+    let summary = compute_net_worth(&accounts, &config);
+    let inv = summary
+        .categories
+        .iter()
+        .find(|c| c.category == AccountCategory::Investments);
+    assert!(inv.is_some());
+    assert_eq!(inv.unwrap().total, dec!(2000));
+}
+
+// --- display names tests ---
+
+#[test]
+fn display_name_uses_config_override() {
+    let account = make_account("acc1", "Raw Name (1234)", "Bank", dec!(100));
+    let mut names = std::collections::HashMap::new();
+    names.insert("acc1".to_string(), "Friendly Name".to_string());
+    let config = DataConfig {
+        display_names: names,
+        ..Default::default()
+    };
+    assert_eq!(display_name_for(&account, &config), "Friendly Name");
+}
+
+#[test]
+fn display_name_falls_back_to_original() {
+    let account = make_account("acc1", "Original Name", "Bank", dec!(100));
+    assert_eq!(
+        display_name_for(&account, &default_config()),
+        "Original Name"
+    );
+}
+
+// --- detail mode tests ---
+
+#[test]
+fn detail_mode_includes_account_breakdown() {
+    let accounts = vec![
+        make_account("1", "Checking A", "Bank", dec!(5000)),
+        make_account("2", "Checking B", "Bank", dec!(3000)),
+    ];
+    let summary = compute_net_worth_detail(&accounts, &default_config(), true);
+    let cash = summary
+        .categories
+        .iter()
+        .find(|c| c.category == AccountCategory::Cash)
+        .unwrap();
+    assert_eq!(cash.accounts.len(), 2);
+    // Sorted by absolute balance descending
+    assert_eq!(cash.accounts[0].name, "Checking A");
+    assert_eq!(cash.accounts[0].balance, dec!(5000));
+    assert_eq!(cash.accounts[1].name, "Checking B");
+}
+
+#[test]
+fn non_detail_mode_omits_accounts() {
+    let accounts = vec![make_account("1", "Checking", "Bank", dec!(5000))];
+    let summary = compute_net_worth_detail(&accounts, &default_config(), false);
+    let cash = summary
+        .categories
+        .iter()
+        .find(|c| c.category == AccountCategory::Cash)
+        .unwrap();
+    assert!(cash.accounts.is_empty());
+}
+
+#[test]
+fn detail_mode_uses_display_names() {
+    let accounts = vec![make_account("acc1", "Checking (1234)", "Bank", dec!(5000))];
+    let mut names = std::collections::HashMap::new();
+    names.insert("acc1".to_string(), "My Checking".to_string());
+    let config = DataConfig {
+        display_names: names,
+        ..Default::default()
+    };
+    let summary = compute_net_worth_detail(&accounts, &config, true);
+    let cash = summary
+        .categories
+        .iter()
+        .find(|c| c.category == AccountCategory::Cash)
+        .unwrap();
+    assert_eq!(cash.accounts[0].name, "My Checking");
 }

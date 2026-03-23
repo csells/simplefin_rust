@@ -115,6 +115,33 @@ enum Commands {
         /// Storage directory path
         #[arg(short, long)]
         storage: String,
+        /// Include per-account breakdown within each category
+        #[arg(short, long)]
+        detail: bool,
+    },
+
+    /// Analyze spending by category over a date range
+    #[command(alias = "p")]
+    Spending {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+        /// Start date (epoch, ISO-8601, or YYYY-MM-DD)
+        #[arg(long)]
+        start_date: Option<String>,
+        /// End date (epoch, ISO-8601, or YYYY-MM-DD)
+        #[arg(long)]
+        end_date: Option<String>,
+    },
+
+    /// Find and optionally remove orphaned data files
+    Cleanup {
+        /// Storage directory path
+        #[arg(short, long)]
+        storage: String,
+        /// Actually remove orphaned files (dry-run by default)
+        #[arg(long)]
+        remove: bool,
     },
 }
 
@@ -181,7 +208,13 @@ async fn run(cx: &Cx, command: Commands) -> simplefin::Result<()> {
             end_date.as_deref(),
             pending,
         ),
-        Commands::Summary { storage } => handle_summary(&storage),
+        Commands::Summary { storage, detail } => handle_summary(&storage, detail),
+        Commands::Spending {
+            storage,
+            start_date,
+            end_date,
+        } => handle_spending(&storage, start_date.as_deref(), end_date.as_deref()),
+        Commands::Cleanup { storage, remove } => handle_cleanup(&storage, remove),
     }
 }
 
@@ -317,6 +350,10 @@ async fn handle_collect(
     let client = AccessClient::new(credentials, None);
     let mut storage = JsonStorage::open(storage_path)?;
 
+    // Load previous accounts for anomaly detection
+    let previous_accounts = storage
+        .get_accounts(&simplefin::AccountFilter::default())?;
+
     // Fetch all accounts with balances to know what we have
     let balances_params = AccountQueryParams {
         balances_only: true,
@@ -332,6 +369,15 @@ async fn handle_collect(
     if account_set.accounts.is_empty() {
         println!("No accounts returned by the bridge.");
         return Ok(());
+    }
+
+    // Detect anomalies by comparing current vs previous accounts
+    if !previous_accounts.is_empty() {
+        let anomalies =
+            simplefin::detect_anomalies(&account_set.accounts, &previous_accounts);
+        for anomaly in &anomalies {
+            eprintln!("{anomaly}");
+        }
     }
 
     // Upsert organizations
@@ -467,7 +513,7 @@ fn handle_query(
     Ok(())
 }
 
-fn handle_summary(storage_path: &str) -> simplefin::Result<()> {
+fn handle_summary(storage_path: &str, detail: bool) -> simplefin::Result<()> {
     let storage = JsonStorage::open(storage_path)?;
     let config = storage.get_config()?;
 
@@ -476,7 +522,7 @@ fn handle_summary(storage_path: &str) -> simplefin::Result<()> {
     let all_history = storage.get_balance_history(&BalanceHistoryFilter::default())?;
 
     let unified = simplefin::unify_accounts(&accounts, &manual_accounts, &all_history);
-    let summary = simplefin::compute_net_worth(&unified, &config);
+    let summary = simplefin::compute_net_worth_detail(&unified, &config, detail);
 
     // Find the two most recent distinct collection timestamps for change reporting
     let mut timestamps: Vec<i64> = all_history.iter().map(|s| s.timestamp).collect();
@@ -509,6 +555,70 @@ fn handle_summary(storage_path: &str) -> simplefin::Result<()> {
             }
         })?
     );
+
+    Ok(())
+}
+
+fn handle_spending(
+    storage_path: &str,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> simplefin::Result<()> {
+    let storage = JsonStorage::open(storage_path)?;
+    let config = storage.get_config()?;
+
+    let start = start_date.map(parse_date).transpose()?;
+    let end = end_date.map(parse_date).transpose()?;
+
+    let transactions = storage.get_transactions(&TransactionFilter {
+        start_date: start,
+        end_date: end,
+        include_pending: Some(false),
+        ..Default::default()
+    })?;
+
+    let summary = simplefin::compute_spending(&transactions, &config.spending_rules);
+
+    let output = serde_json::to_string_pretty(&summary).map_err(|e| SimplefinError::Storage {
+        message: "failed to serialize spending output".into(),
+        source: Some(Box::new(e)),
+    })?;
+    println!("{output}");
+
+    Ok(())
+}
+
+fn handle_cleanup(storage_path: &str, remove: bool) -> simplefin::Result<()> {
+    let storage = JsonStorage::open(storage_path)?;
+    let orphans = storage.find_orphaned_data()?;
+
+    if orphans.is_empty() {
+        println!("No orphaned data found.");
+        return Ok(());
+    }
+
+    if remove {
+        println!("Removing {} orphaned file(s):", orphans.len());
+        for orphan in &orphans {
+            println!(
+                "  {} ({:?}): {}",
+                orphan.account_id, orphan.data_type, orphan.path
+            );
+        }
+        storage.remove_orphaned_data(&orphans)?;
+        println!("Done.");
+    } else {
+        println!(
+            "Found {} orphaned file(s) (use --remove to delete):",
+            orphans.len()
+        );
+        for orphan in &orphans {
+            println!(
+                "  {} ({:?}): {}",
+                orphan.account_id, orphan.data_type, orphan.path
+            );
+        }
+    }
 
     Ok(())
 }

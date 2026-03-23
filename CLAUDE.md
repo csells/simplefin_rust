@@ -18,7 +18,7 @@ This is a Cargo workspace mono-repo with two first-class crates:
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (must pass with zero warnings)
-cargo test           # Run all tests (155 currently)
+cargo test           # Run all tests (186 currently)
 cargo run -p simplefin-cli -- --help  # Run the CLI
 ```
 
@@ -41,11 +41,13 @@ Key patterns:
 - `credentials.rs` — `SetupToken` (Base64 decode → claim URL) and `AccessCredentials` (parse access URL → extract Basic Auth username/password, build endpoint URLs).
 - `clients/` — `BridgeClient` (bridge info + claim token exchange) and `AccessClient` (account/transaction queries). Both use asupersync's native HTTP client.
 - `storage/` — `Storage` trait for persisting collected data, plus `JsonStorage` (JSON-file-based default implementation). Filter types: `OrgFilter`, `AccountFilter`, `TransactionFilter`. `UnifiedAccount` merges SimpleFIN and manual accounts into one type. `unify_accounts()` combines both sources. Balance snapshots deduped when unchanged. `DataConfig` stores per-user settings (exclusion patterns, classification overrides) in the data directory. `ManualAccount` includes `refresh_days` for staleness checking. `StaleAccount` reports which manual accounts need balance updates.
-- `analysis.rs` — Financial analysis: `classify_account()` (five categories), `compute_net_worth()` and `compute_changes()` accept `&DataConfig` for exclusions and classification overrides.
+- `analysis.rs` — Financial analysis: `classify_account()` (five categories), `compute_net_worth()`/`compute_net_worth_detail()` and `compute_changes()` accept `&DataConfig` for exclusions, classification overrides/rules, and display names. Classification priority: ID override > classification rules > heuristic classifier.
+- `anomaly.rs` — Anomaly detection: `detect_anomalies()` compares current vs previous account balances, flagging balances dropped to zero, large changes (>20%), disappeared accounts, and new accounts.
+- `spending.rs` — Spending analysis: `classify_transaction()` and `compute_spending()` categorize transactions into spending categories (Restaurants, Groceries, Utilities, etc.) using built-in keyword patterns and optional custom rules.
 - `error.rs` — Single `SimplefinError` enum with variants: `InvalidSetupToken`, `DataFormat`, `Api`, `Http`, `InvalidArgument`, `Storage`.
 
 **CLI (`simplefin-cli/src/main.rs`):**
-- Clap-derived CLI with subcommands: `claim` (c), `info` (i), `collect` (l), `add-balance` (a), `stale` (t), `query` (q), `summary` (s)
+- Clap-derived CLI with subcommands: `claim` (c), `info` (i), `collect` (l), `add-balance` (a), `stale` (t), `query` (q), `summary` (s), `spending` (p), `cleanup`
 - Loads `.env` via dotenvy for `SIMPLEFIN_ACCESS_URL`
 
 ## API Flow
@@ -87,4 +89,5 @@ These apply to all code in this project — frontend and server:
 - Errors Are Not Optional — log errors and inform the user of them, don't hide them. Every failure must be tracked in a centralized log so it can be used to improve the app over time.
 - Idiomatic Project Layout — follow language/framework conventions for folder structure, lints, and tooling.
 - Write for Maintainability — clear, readable code that future developers can understand without archaeology.
-- No PII in the repo — never include real account numbers, names, balances, institution-specific details, or any personally identifying financial data in code, tests, docs, examples, or commit messages. Use generic placeholders instead (e.g., "Checking (1234)", "My 401k", "Duplicate Account"). User-specific data belongs in the data directory, not in source control.
+- No PII in the repo — never include real account numbers, names, balances, institution-specific details, email addresses, file paths containing usernames, or any personally identifying financial data in code, tests, docs, examples, or commit messages. Use generic placeholders instead (e.g., "Checking (1234)", "My 401k", "Duplicate Account"). User-specific data belongs in the data directory, not in source control.
+- Pre-commit PII scan — before every commit, scan all staged changes for PII patterns: real names, email addresses, account numbers, specific balances, addresses, employer names, institution-specific account details, and paths containing usernames or email addresses. If any PII is found, fix it before committing. This is a blocking requirement, not optional.

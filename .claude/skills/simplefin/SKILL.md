@@ -30,12 +30,9 @@ The CLI binary is built from this workspace. Build it if needed with `cargo buil
 
 ## Storage location
 
-Data is stored on Google Drive, **outside** the repo (this is a public repo — no financial
-data in git):
-
-```
-SIMPLEFIN_DATA="$HOME/Library/CloudStorage/GoogleDrive-csells@sellsbrothers.com/My Drive/data/finances/simplefin-data"
-```
+Data is stored **outside** the repo (this is a public repo — no financial data in git).
+The `SIMPLEFIN_DATA` environment variable must point to the storage directory. Set it
+in `.env` at the workspace root alongside `SIMPLEFIN_ACCESS_URL`.
 
 All `--storage` / `-s` flags below use `"$SIMPLEFIN_DATA"` as the path.
 
@@ -126,12 +123,49 @@ For net worth questions, use `summary` instead of `query` — it does the classi
 and math in Rust so you don't have to:
 
 ```bash
+# Category totals only
 cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA"
+
+# With per-account breakdown within each category
+cargo run -p simplefin-cli -- summary --storage "$SIMPLEFIN_DATA" --detail
 ```
 
 The output includes `net_worth` (categorized totals, total_assets, total_liabilities,
 net_worth) and `changes` (per-account balance deltas since the previous collection).
+With `--detail`, each category includes an `accounts` array with per-account name,
+org, and balance — sorted by absolute balance descending. Display names from config
+are used when available.
+
 This is the fastest way to answer "what's my net worth?" — just read the JSON output.
+
+### Step 3c: Spending analysis
+
+For spending questions, use the `spending` subcommand:
+
+```bash
+# All time
+cargo run -p simplefin-cli -- spending --storage "$SIMPLEFIN_DATA"
+
+# Specific date range
+cargo run -p simplefin-cli -- spending --storage "$SIMPLEFIN_DATA" \
+  --start-date 2024-01-01 --end-date 2024-02-01
+```
+
+Output includes per-category totals (Restaurants, Groceries, Utilities, etc.),
+transaction counts, total spending, total income, and net.
+
+### Step 3d: Data cleanup
+
+To find orphaned data files (balance history or transactions for accounts that
+no longer exist):
+
+```bash
+# Dry run
+cargo run -p simplefin-cli -- cleanup --storage "$SIMPLEFIN_DATA"
+
+# Remove orphaned files
+cargo run -p simplefin-cli -- cleanup --storage "$SIMPLEFIN_DATA" --remove
+```
 
 ### Query output format
 
@@ -179,8 +213,9 @@ Parse the JSON output and answer the user's question. Common analyses:
 - **Net worth by category**: Also in the `summary` output — categories are Cash, Investments, Other Assets, Credit Cards, Loans.
 - **Net worth trends**: Group `balance_history` by timestamp, sum all balances at each collection time to show total net worth over time.
 - **Changes since last collection**: The `summary` output includes a `changes` array showing per-account balance deltas.
-- **Spending**: Sum negative transaction amounts over a period
-- **Income**: Sum positive transaction amounts over a period
+- **Net worth by account**: Use `summary --detail` — each category includes per-account breakdowns with display names from config.
+- **Spending**: Use the `spending` subcommand — it classifies transactions into categories and computes totals.
+- **Income**: Also in the `spending` output — `total_income` field.
 - **Account summary**: Use `query` — accounts are unified (SimpleFIN + manual in one list with `source` field)
 - **Transaction search**: Filter transactions by description, amount, date
 - **Trends**: Compare balances across time using `balance_history`
@@ -224,6 +259,10 @@ This file supports:
   duplicates, closed accounts, or test accounts.
 - `classification_overrides` — maps account IDs to specific categories, overriding the
   heuristic classifier.
+- `classification_rules` — ordered list of pattern-matching rules (substring match on
+  account name or org name) checked before the heuristic classifier. First match wins.
+- `display_names` — maps account IDs to friendly display names used in `--detail` output.
+- `spending_rules` — custom rules for classifying transactions into spending categories.
 
 The `summary` command reads this config automatically. When accounts are misclassified
 or need to be excluded, update this file — don't hardcode fixes in the Rust source.

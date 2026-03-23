@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::storage::{BalanceSnapshot, DataConfig, UnifiedAccount};
+use crate::storage::{BalanceSnapshot, ClassificationField, DataConfig, UnifiedAccount};
 
 /// Standard account categories for net worth reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -92,12 +92,23 @@ pub fn classify_account(name: &str, org_name: &str) -> AccountCategory {
     AccountCategory::OtherAssets
 }
 
+/// Per-account detail within a category.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountDetail {
+    pub id: String,
+    pub name: String,
+    pub org_name: String,
+    pub balance: Decimal,
+}
+
 /// Per-category total in a net worth summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryTotal {
     pub category: AccountCategory,
     pub label: String,
     pub total: Decimal,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountDetail>,
 }
 
 /// Categorized net worth summary.
@@ -118,20 +129,54 @@ fn is_excluded(account: &UnifiedAccount, config: &DataConfig) -> bool {
         .any(|pattern| lower_name.contains(&pattern.to_lowercase()))
 }
 
-/// Classify an account, respecting config overrides.
+/// Returns the display name for an account, falling back to the original name.
+pub fn display_name_for(account: &UnifiedAccount, config: &DataConfig) -> String {
+    config
+        .display_names
+        .get(&account.id)
+        .cloned()
+        .unwrap_or_else(|| account.name.clone())
+}
+
+/// Classify an account, respecting config overrides and rules.
+/// Priority: ID override > classification rules > heuristic classifier.
 fn classify_with_config(account: &UnifiedAccount, config: &DataConfig) -> AccountCategory {
     if let Some(&cat) = config.classification_overrides.get(&account.id) {
         return cat;
     }
+
+    let lower_name = account.name.to_lowercase();
+    let lower_org = account.org_name.to_lowercase();
+    for rule in &config.classification_rules {
+        let lower_pattern = rule.pattern.to_lowercase();
+        let matches = match rule.field {
+            ClassificationField::Name => lower_name.contains(&lower_pattern),
+            ClassificationField::Org => lower_org.contains(&lower_pattern),
+        };
+        if matches {
+            return rule.category;
+        }
+    }
+
     classify_account(&account.name, &account.org_name)
 }
 
-/// Compute net worth grouped by Standard categories.
+/// Compute net worth grouped by standard categories.
 ///
 /// Accounts matching `config.excluded_account_patterns` are excluded.
-/// Accounts in `config.classification_overrides` use the overridden category.
+/// When `detail` is true, each category includes per-account breakdowns.
 pub fn compute_net_worth(accounts: &[UnifiedAccount], config: &DataConfig) -> NetWorthSummary {
+    compute_net_worth_detail(accounts, config, false)
+}
+
+/// Compute net worth with optional per-account detail.
+pub fn compute_net_worth_detail(
+    accounts: &[UnifiedAccount],
+    config: &DataConfig,
+    detail: bool,
+) -> NetWorthSummary {
     let mut by_category: HashMap<AccountCategory, Decimal> = HashMap::new();
+    let mut accounts_by_category: HashMap<AccountCategory, Vec<AccountDetail>> = HashMap::new();
 
     for account in accounts {
         if is_excluded(account, config) {
@@ -140,6 +185,25 @@ pub fn compute_net_worth(accounts: &[UnifiedAccount], config: &DataConfig) -> Ne
 
         let cat = classify_with_config(account, config);
         *by_category.entry(cat).or_insert(Decimal::ZERO) += account.balance;
+
+        if detail {
+            accounts_by_category
+                .entry(cat)
+                .or_default()
+                .push(AccountDetail {
+                    id: account.id.clone(),
+                    name: display_name_for(account, config),
+                    org_name: account.org_name.clone(),
+                    balance: account.balance,
+                });
+        }
+    }
+
+    // Sort accounts within each category by absolute balance descending
+    if detail {
+        for accounts in accounts_by_category.values_mut() {
+            accounts.sort_by(|a, b| b.balance.abs().cmp(&a.balance.abs()));
+        }
     }
 
     // Build sorted category list
@@ -157,6 +221,7 @@ pub fn compute_net_worth(accounts: &[UnifiedAccount], config: &DataConfig) -> Ne
                 category: *cat,
                 label: cat.to_string(),
                 total,
+                accounts: accounts_by_category.remove(cat).unwrap_or_default(),
             })
         })
         .collect();

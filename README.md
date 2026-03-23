@@ -59,6 +59,8 @@ Commands:
   stale        Show manual accounts whose balances are stale and need updating
   query        Query collected data as JSON
   summary      Show categorized net worth summary with changes since last collection
+  spending     Analyze spending by category over a date range
+  cleanup      Find and optionally remove orphaned data files
 ```
 
 ### Collect financial data
@@ -133,6 +135,9 @@ Categorized net worth with changes since the last collection, computed in Rust:
 
 ```bash
 simplefin summary -s ./data
+
+# Include per-account breakdown within each category
+simplefin summary -s ./data --detail
 ```
 
 Output:
@@ -182,6 +187,53 @@ in the repo):
 - **`classification_overrides`** -- maps account IDs to specific categories
   (`cash`, `investments`, `other_assets`, `credit_cards`, `loans`),
   overriding the heuristic classifier.
+- **`classification_rules`** -- ordered list of pattern-matching rules checked
+  before the heuristic classifier. Each rule has a `pattern` (substring),
+  `field` (`name` or `org`), and target `category`. First match wins.
+- **`display_names`** -- maps account IDs to friendly display names shown in
+  summary output instead of the raw account name.
+- **`spending_rules`** -- custom rules for classifying transactions into
+  spending categories, overriding the built-in keyword patterns.
+
+### Spending analysis
+
+Analyze spending by category over a date range:
+
+```bash
+# All time
+simplefin spending -s ./data
+
+# Specific date range
+simplefin spending -s ./data --start-date 2024-01-01 --end-date 2024-02-01
+```
+
+Transactions are classified into categories (Restaurants, Groceries, Utilities,
+Transportation, Shopping, Entertainment, Healthcare, Income, Transfer, Other)
+using built-in keyword patterns and optional custom rules in `config.json`.
+
+### Cleanup orphaned data
+
+Find and remove data files for accounts that no longer exist:
+
+```bash
+# Dry run — show what would be removed
+simplefin cleanup -s ./data
+
+# Actually remove orphaned files
+simplefin cleanup -s ./data --remove
+```
+
+### Anomaly detection
+
+During `collect`, the CLI automatically compares incoming account balances
+against the previously stored values and warns about:
+
+- Balances that dropped to $0
+- Large balance changes (>20%)
+- Accounts that disappeared
+- New accounts that appeared
+
+Warnings are printed to stderr alongside bridge messages.
 
 ## Library API
 
@@ -277,7 +329,7 @@ the LLM's head.
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (zero warnings required)
-cargo test           # Run all tests (155 currently)
+cargo test           # Run all tests (186 currently)
 ```
 
 ## Resources

@@ -9,7 +9,8 @@ use rust_decimal::Decimal;
 
 use super::traits::{
     AccountFilter, BalanceHistoryFilter, BalanceSnapshot, DataConfig, ManualAccount, OrgFilter,
-    StaleAccount, Storage, TransactionFilter, TransactionWithContext,
+    OrphanedData, OrphanedDataType, StaleAccount, Storage, TransactionFilter,
+    TransactionWithContext,
 };
 
 /// JSON-file-based storage backend.
@@ -366,6 +367,84 @@ impl Storage for JsonStorage {
         }
 
         Ok(stale)
+    }
+
+    fn find_orphaned_data(&self) -> Result<Vec<OrphanedData>> {
+        let accounts = self.load_accounts()?;
+        let manual_accounts = self.get_manual_accounts()?;
+
+        let known_ids: std::collections::HashSet<&str> = accounts
+            .iter()
+            .map(|a| a.id.as_str())
+            .chain(manual_accounts.iter().map(|a| a.id.as_str()))
+            .collect();
+
+        let mut orphans = Vec::new();
+
+        // Check balance_history/ directory
+        let bh_dir = self.root.join("balance_history");
+        if bh_dir.exists() {
+            for entry in fs::read_dir(&bh_dir).map_err(|e| SimplefinError::Storage {
+                message: "failed to read balance_history directory".into(),
+                source: Some(Box::new(e)),
+            })? {
+                let entry = entry.map_err(|e| SimplefinError::Storage {
+                    message: "failed to read directory entry".into(),
+                    source: Some(Box::new(e)),
+                })?;
+                let path = entry.path();
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && path.extension().is_some_and(|ext| ext == "json")
+                    && !known_ids.contains(stem)
+                {
+                    orphans.push(OrphanedData {
+                        account_id: stem.to_string(),
+                        data_type: OrphanedDataType::BalanceHistory,
+                        path: path.to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+
+        // Check transactions/ directory
+        let txn_dir = self.root.join("transactions");
+        if txn_dir.exists() {
+            for entry in fs::read_dir(&txn_dir).map_err(|e| SimplefinError::Storage {
+                message: "failed to read transactions directory".into(),
+                source: Some(Box::new(e)),
+            })? {
+                let entry = entry.map_err(|e| SimplefinError::Storage {
+                    message: "failed to read directory entry".into(),
+                    source: Some(Box::new(e)),
+                })?;
+                let path = entry.path();
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && path.extension().is_some_and(|ext| ext == "json")
+                    && !known_ids.contains(stem)
+                {
+                    orphans.push(OrphanedData {
+                        account_id: stem.to_string(),
+                        data_type: OrphanedDataType::Transactions,
+                        path: path.to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(orphans)
+    }
+
+    fn remove_orphaned_data(&self, orphans: &[OrphanedData]) -> Result<()> {
+        for orphan in orphans {
+            let path = Path::new(&orphan.path);
+            if path.exists() {
+                fs::remove_file(path).map_err(|e| SimplefinError::Storage {
+                    message: format!("failed to remove orphaned file: {}", orphan.path),
+                    source: Some(Box::new(e)),
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn get_balance_history(&self, filter: &BalanceHistoryFilter) -> Result<Vec<BalanceSnapshot>> {
