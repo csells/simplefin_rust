@@ -228,12 +228,14 @@ simplefin spending -s ./data
 simplefin spending -s ./data --start-date 2024-01-01 --end-date 2024-02-01
 ```
 
-Transactions are classified into categories (Restaurants, Groceries, Utilities,
-Transportation, Shopping, Entertainment, Healthcare, Housing, Insurance,
-Subscriptions, Education, Personal Care, Pets, Income, Transfer, Other) using
-data-driven keyword patterns stored in `spending_patterns.json` in the data
-directory. Patterns are seeded with defaults on first use and customizable via
-the `spending-rules` command. Custom rules in `config.json` take priority.
+Transactions are classified into spending categories using data-driven keyword
+patterns stored in `spending_patterns.json` in the data directory. Categories
+are plain strings — not a hardcoded enum — so you can create new ones (e.g.,
+"donations") simply by adding a rule. Defaults are seeded on first use with
+16 categories (Restaurants, Groceries, Utilities, Transportation, Shopping,
+Entertainment, Healthcare, Housing, Insurance, Subscriptions, Education,
+Personal Care, Pets, Income, Transfer, Other). Customize via the
+`spending-rules` command. Custom rules in `config.json` take priority.
 
 ### Manage spending patterns
 
@@ -257,7 +259,8 @@ simplefin spending-rules -s ./data --reset
 
 User rules in `config.json` (via `spending_rules`) take priority over patterns
 in `spending_patterns.json`. Unclassified transactions (category "Other") are
-reported in the spending output so you know what to teach.
+reported in the spending output so you know what to teach. Any string is a
+valid category — to create "donations", just use `--category donations`.
 
 ### Recurring expense detection
 
