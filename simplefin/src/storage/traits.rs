@@ -317,6 +317,10 @@ pub trait Storage {
     /// Records the last collection timestamp for an account.
     fn set_last_collected(&mut self, account_id: &str, timestamp: i64) -> Result<()>;
 
+    /// Returns the maximum `posted` timestamp from stored transactions for an account,
+    /// excluding pending (posted <= 0) entries. Used to recover from corrupted state.
+    fn max_stored_posted(&self, account_id: &str) -> Result<Option<i64>>;
+
     /// Insert or update manual accounts (not connected to SimpleFIN).
     fn upsert_manual_accounts(&mut self, accounts: &[ManualAccount]) -> Result<()>;
 

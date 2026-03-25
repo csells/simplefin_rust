@@ -298,6 +298,12 @@ impl Storage for JsonStorage {
         self.write_state(&state)
     }
 
+    fn max_stored_posted(&self, account_id: &str) -> Result<Option<i64>> {
+        let path = self.transactions_path(account_id);
+        let txns: Vec<Transaction> = self.read_json(&path)?;
+        Ok(txns.iter().filter(|t| t.posted > 0).map(|t| t.posted).max())
+    }
+
     fn upsert_manual_accounts(&mut self, accounts: &[ManualAccount]) -> Result<()> {
         let path = self.manual_accounts_path();
         let mut existing: Vec<ManualAccount> = self.read_json(&path)?;

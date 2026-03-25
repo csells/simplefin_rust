@@ -685,9 +685,28 @@ async fn handle_collect(
     let mut account_count = 0usize;
 
     for account in &account_set.accounts {
-        // Default to epoch 0 to fetch all available history on first collection,
-        // since the SimpleFIN API returns no transactions without a start-date.
-        let start_date = storage.last_collected(&account.id)?.or(Some(0));
+        // Determine the start date for incremental fetching.
+        // If state is 0 (corrupted) but we have stored transactions, recover from
+        // the latest stored transaction timestamp instead of re-fetching from epoch.
+        let state_ts = storage.last_collected(&account.id)?;
+        let start_date = match state_ts {
+            Some(ts) if ts > 0 => Some(ts),
+            _ => {
+                // State is missing or zero — try to recover from stored transactions
+                let recovered = storage.max_stored_posted(&account.id)?;
+                if let Some(ts) = recovered {
+                    // Fix the corrupted state while we're at it
+                    storage.set_last_collected(&account.id, ts)?;
+                    if verbose {
+                        eprintln!(
+                            "  {}: recovered sync state from stored transactions ({})",
+                            account.name, ts
+                        );
+                    }
+                }
+                recovered.or(Some(0))
+            }
+        };
 
         let params = AccountQueryParams {
             start_date,
@@ -710,8 +729,20 @@ async fn handle_collect(
                 storage.upsert_transactions(&fetched_account.id, &fetched_account.transactions)?;
             let dupe_count = txn_count - new_count;
 
-            if let Some(max_posted) = fetched_account.transactions.iter().map(|t| t.posted).max() {
-                storage.set_last_collected(&fetched_account.id, max_posted)?;
+            // Only consider non-pending transactions with valid timestamps for state.
+            // Pending transactions may have posted=0, which would corrupt the state.
+            if let Some(max_posted) = fetched_account
+                .transactions
+                .iter()
+                .filter(|t| !t.pending && t.posted > 0)
+                .map(|t| t.posted)
+                .max()
+            {
+                // Never let state go backwards — only advance forward.
+                let current = storage.last_collected(&fetched_account.id)?;
+                if current.is_none_or(|ts| max_posted > ts) {
+                    storage.set_last_collected(&fetched_account.id, max_posted)?;
+                }
             }
 
             if verbose {

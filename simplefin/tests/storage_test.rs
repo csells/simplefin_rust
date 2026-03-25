@@ -181,6 +181,65 @@ fn last_collected_updates() {
     assert_eq!(storage.last_collected("acc1").unwrap(), Some(1700005000));
 }
 
+// === max_stored_posted ===
+
+#[test]
+fn max_stored_posted_returns_none_for_empty() {
+    let (_dir, storage) = open_temp_storage();
+    assert_eq!(storage.max_stored_posted("acc1").unwrap(), None);
+}
+
+#[test]
+fn max_stored_posted_returns_max_non_pending() {
+    let (_dir, mut storage) = open_temp_storage();
+    let org = test_org("org1", "Bank");
+    let acct = test_account("acc1", "Checking", &org);
+    storage.upsert_organizations(&[org]).unwrap();
+    storage.upsert_accounts(&[acct]).unwrap();
+
+    let txns = vec![
+        test_transaction("t1", "-10.00", 1700000000),
+        test_transaction("t2", "-20.00", 1700050000),
+        test_transaction("t3", "-5.00", 1700025000),
+    ];
+    storage.upsert_transactions("acc1", &txns).unwrap();
+
+    assert_eq!(storage.max_stored_posted("acc1").unwrap(), Some(1700050000));
+}
+
+#[test]
+fn max_stored_posted_excludes_zero_posted() {
+    let (_dir, mut storage) = open_temp_storage();
+    let org = test_org("org1", "Bank");
+    let acct = test_account("acc1", "Checking", &org);
+    storage.upsert_organizations(&[org]).unwrap();
+    storage.upsert_accounts(&[acct]).unwrap();
+
+    let mut pending = test_transaction("t1", "-10.00", 0);
+    pending.pending = true;
+    let posted = test_transaction("t2", "-20.00", 1700000000);
+    storage.upsert_transactions("acc1", &[pending, posted]).unwrap();
+
+    assert_eq!(storage.max_stored_posted("acc1").unwrap(), Some(1700000000));
+}
+
+#[test]
+fn max_stored_posted_none_when_all_pending() {
+    let (_dir, mut storage) = open_temp_storage();
+    let org = test_org("org1", "Bank");
+    let acct = test_account("acc1", "Checking", &org);
+    storage.upsert_organizations(&[org]).unwrap();
+    storage.upsert_accounts(&[acct]).unwrap();
+
+    let mut t1 = test_transaction("t1", "-10.00", 0);
+    t1.pending = true;
+    let mut t2 = test_transaction("t2", "-5.00", 0);
+    t2.pending = true;
+    storage.upsert_transactions("acc1", &[t1, t2]).unwrap();
+
+    assert_eq!(storage.max_stored_posted("acc1").unwrap(), None);
+}
+
 // === Filter correctness ===
 
 #[test]
