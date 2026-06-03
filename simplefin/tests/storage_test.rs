@@ -738,6 +738,44 @@ fn record_balance_records_change_back_to_original() {
     assert_eq!(history.len(), 3);
 }
 
+#[test]
+fn record_balance_unchanged_value_advances_freshness() {
+    // Re-confirming an unchanged balance must clear the stale flag without
+    // appending a duplicate snapshot row.
+    let (_dir, mut storage) = open_temp_storage();
+    let manual = ManualAccount {
+        id: "manual-test".to_string(),
+        name: "Test".to_string(),
+        org_name: "Org".to_string(),
+        currency: "USD".to_string(),
+        refresh_days: 7,
+    };
+    storage.upsert_manual_accounts(&[manual]).unwrap();
+    let now = 1_000_000i64;
+    let bal = Decimal::from_str("100").unwrap();
+
+    // Recorded 30 days ago — stale under a 7-day refresh window.
+    storage
+        .record_balance("manual-test", now - 30 * 86400, bal)
+        .unwrap();
+    assert_eq!(storage.get_stale_accounts(now).unwrap().len(), 1);
+
+    // Re-confirm the *same* value today — should clear staleness.
+    storage.record_balance("manual-test", now, bal).unwrap();
+    assert!(storage.get_stale_accounts(now).unwrap().is_empty());
+
+    // No duplicate same-value snapshot row was created.
+    let history = storage
+        .get_balance_history(&BalanceHistoryFilter {
+            account_id: Some("manual-test".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    // The original snapshot timestamp is preserved (historical truth intact).
+    assert_eq!(history[0].timestamp, now - 30 * 86400);
+}
+
 // === Unified accounts ===
 
 #[test]

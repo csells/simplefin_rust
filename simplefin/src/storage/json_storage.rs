@@ -23,6 +23,7 @@ use super::traits::{
 ///   transactions/
 ///     {account_id}.json   — Vec<Transaction>
 ///   state.json            — HashMap<account_id, last_collected_epoch>
+///   balance_verified.json — HashMap<account_id, last_verified_epoch>
 ///   manual_accounts.json  — Vec<ManualAccount>
 ///   balance_history/
 ///     {account_id}.json   — Vec<BalanceSnapshot>
@@ -66,6 +67,10 @@ impl JsonStorage {
 
     fn state_path(&self) -> PathBuf {
         self.root.join("state.json")
+    }
+
+    fn balance_verified_path(&self) -> PathBuf {
+        self.root.join("balance_verified.json")
     }
 
     fn manual_accounts_path(&self) -> PathBuf {
@@ -127,6 +132,18 @@ impl JsonStorage {
 
     fn write_state(&self, state: &HashMap<String, i64>) -> Result<()> {
         self.write_json(&self.state_path(), state)
+    }
+
+    /// When a balance was last verified per account. Distinct from the latest
+    /// balance_history snapshot timestamp (which means "balance had this value
+    /// as of this time"): re-confirming an unchanged value advances verification
+    /// without appending a duplicate snapshot or disturbing historical truth.
+    fn read_balance_verified(&self) -> Result<HashMap<String, i64>> {
+        self.read_json(&self.balance_verified_path())
+    }
+
+    fn write_balance_verified(&self, verified: &HashMap<String, i64>) -> Result<()> {
+        self.write_json(&self.balance_verified_path(), verified)
     }
 
     fn load_accounts(&self) -> Result<Vec<Account>> {
@@ -322,10 +339,20 @@ impl Storage for JsonStorage {
     }
 
     fn record_balance(&mut self, account_id: &str, timestamp: i64, balance: Decimal) -> Result<()> {
+        // Always record that the balance was verified at this time, even when the
+        // value is unchanged, so re-confirming a stable balance clears staleness.
+        let mut verified = self.read_balance_verified()?;
+        let entry = verified.entry(account_id.to_string()).or_insert(timestamp);
+        if timestamp > *entry {
+            *entry = timestamp;
+        }
+        self.write_balance_verified(&verified)?;
+
         let path = self.balance_history_path(account_id);
         let mut history: Vec<BalanceSnapshot> = self.read_json(&path)?;
 
-        // Skip if the most recent snapshot has the same balance
+        // Skip appending a duplicate when the most recent snapshot has the same
+        // balance — the verification timestamp above already captured the recheck.
         if let Some(last) = history.last()
             && last.balance == balance
         {
@@ -351,16 +378,21 @@ impl Storage for JsonStorage {
 
     fn get_stale_accounts(&self, now: i64) -> Result<Vec<StaleAccount>> {
         let manual_accounts = self.get_manual_accounts()?;
+        let verified = self.read_balance_verified()?;
         let mut stale = Vec::new();
 
         for ma in &manual_accounts {
-            let latest_ts = self
-                .get_balance_history(&BalanceHistoryFilter {
+            // Freshness is the last verification time. Fall back to the latest
+            // snapshot timestamp for data written before verification tracking.
+            let latest_ts = verified.get(&ma.id).copied().or_else(|| {
+                self.get_balance_history(&BalanceHistoryFilter {
                     account_id: Some(ma.id.clone()),
                     ..Default::default()
-                })?
+                })
+                .ok()?
                 .last()
-                .map(|s| s.timestamp);
+                .map(|s| s.timestamp)
+            });
 
             let days_since = latest_ts.map(|ts| ((now - ts) as u64) / 86400);
             let is_stale = match days_since {
