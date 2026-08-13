@@ -1192,3 +1192,54 @@ fn status_after_collection() {
     assert!(status.warnings.is_some());
     assert_eq!(status.warnings.unwrap().bridge_messages.len(), 1);
 }
+
+#[test]
+fn get_transactions_includes_manual_accounts() {
+    let (_dir, mut storage) = open_temp_storage();
+    let org = test_org("org1", "Bank");
+    storage
+        .upsert_accounts(&[test_account("acc1", "Checking", &org)])
+        .unwrap();
+    storage
+        .upsert_transactions("acc1", &[test_transaction("tx1", "-50.00", 1700000000)])
+        .unwrap();
+
+    let manual = ManualAccount {
+        id: "manual-fua".to_string(),
+        name: "My 401k".to_string(),
+        org_name: "My Provider".to_string(),
+        currency: "USD".to_string(),
+        refresh_days: 30,
+    };
+    storage.upsert_manual_accounts(&[manual]).unwrap();
+    storage
+        .upsert_transactions("manual-fua", &[test_transaction("tx2", "229.79", 1700001000)])
+        .unwrap();
+
+    // Unfiltered: both the SimpleFIN and manual account transactions appear.
+    let all = storage.get_transactions(&TransactionFilter::default()).unwrap();
+    assert_eq!(all.len(), 2);
+    let manual_txn = all.iter().find(|t| t.account_id == "manual-fua").unwrap();
+    assert_eq!(manual_txn.account_name, "My 401k");
+    assert_eq!(manual_txn.org_name, "My Provider");
+
+    // Account-id filter targets the manual account directly.
+    let filtered = storage
+        .get_transactions(&TransactionFilter {
+            account_id: Some("manual-fua".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, "tx2");
+
+    // An org filter matches SimpleFIN accounts only (manual accounts have no org id).
+    let by_org = storage
+        .get_transactions(&TransactionFilter {
+            org_id: Some("org1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(by_org.len(), 1);
+    assert_eq!(by_org[0].id, "tx1");
+}

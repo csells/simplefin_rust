@@ -247,7 +247,11 @@ impl Storage for JsonStorage {
     fn get_transactions(&self, filter: &TransactionFilter) -> Result<Vec<TransactionWithContext>> {
         let accounts = self.load_accounts()?;
 
-        let target_accounts: Vec<&Account> = accounts
+        // (id, name, org display name, currency) for every account that can
+        // own a transactions file. Manual accounts may carry imported
+        // transaction history too; they have no org id, so an org filter
+        // matches SimpleFIN accounts only.
+        let mut targets: Vec<(String, String, String, String)> = accounts
             .iter()
             .filter(|a| {
                 if let Some(ref id) = filter.account_id
@@ -262,11 +266,30 @@ impl Storage for JsonStorage {
                 }
                 true
             })
+            .map(|a| {
+                (
+                    a.id.clone(),
+                    a.name.clone(),
+                    a.org.display_name().to_string(),
+                    a.currency.clone(),
+                )
+            })
             .collect();
 
+        if filter.org_id.is_none() {
+            for m in self.get_manual_accounts()? {
+                if let Some(ref id) = filter.account_id
+                    && m.id != *id
+                {
+                    continue;
+                }
+                targets.push((m.id, m.name, m.org_name, m.currency));
+            }
+        }
+
         let mut results = Vec::new();
-        for account in target_accounts {
-            let path = self.transactions_path(&account.id);
+        for (account_id, account_name, org_name, currency) in targets {
+            let path = self.transactions_path(&account_id);
             let txns: Vec<Transaction> = self.read_json(&path)?;
             for txn in txns {
                 if let Some(start) = filter.start_date
@@ -288,10 +311,10 @@ impl Storage for JsonStorage {
 
                 results.push(TransactionWithContext {
                     id: txn.id,
-                    account_id: account.id.clone(),
-                    account_name: account.name.clone(),
-                    org_name: account.org.display_name().to_string(),
-                    currency: account.currency.clone(),
+                    account_id: account_id.clone(),
+                    account_name: account_name.clone(),
+                    org_name: org_name.clone(),
+                    currency: currency.clone(),
                     posted: txn.posted,
                     amount: txn.amount,
                     description: txn.description,
