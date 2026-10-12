@@ -12,7 +12,7 @@ This is a Cargo workspace mono-repo with three first-class crates:
 
 - **`simplefin/`** — Library crate. API client, data models, credentials, storage abstraction, financial analysis.
 - **`simplefin-cli/`** — Binary crate (`simplefin` executable). CLI for setup, data collection, querying, and net worth summaries.
-- **`simplefin-app/`** — GPUI + Ely app (web/WebAssembly, Android and desktop) with Empower-style features over the library. See `simplefin-app/README.md`; it builds Ely from a sibling checkout via the workspace `[patch]`.
+- **`simplefin-app/`** — GPUI + Ely app (web/WebAssembly, Android and desktop) with Empower-style features over the library. See `simplefin-app/README.md`; it builds Ely from the `mobile-targets` branch of the csells/Ely-GPUI-Components fork via the workspace `[patch]`.
 
 ## Build & Test
 

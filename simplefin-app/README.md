@@ -50,11 +50,12 @@ web, the origin's `localStorage` (nothing is stored server-side).
 
 ## Dependencies that need attention
 
-- **Ely** is patched in the workspace `Cargo.toml` to a sibling checkout,
-  `../../ZacharyZhang-NY/Ely-GPUI-Components`, on branch `simplefin-android`.
-  The patch moves Ely's `gpui_platform` dependency off Android/iOS, which have
-  no GPUI desktop backend. Upstream or publish that change before building
-  elsewhere.
+- **Ely** is patched in the workspace `Cargo.toml` to the `mobile-targets`
+  branch of [csells/Ely-GPUI-Components](https://github.com/csells/Ely-GPUI-Components),
+  a fork of upstream Ely with one commit that moves Ely's `gpui_platform`
+  dependency off Android/iOS (which have no GPUI desktop backend). `Cargo.lock`
+  pins the exact commit. Once upstream accepts the change, delete the
+  `[patch]` and run `cargo update -p ely-gpui-component`.
 - **gpui-mobile** comes from `longbridge/gpui-mobile` at a pinned rev; it is the
   fork that tracks the same `gpui-pre 0.3.8` snapshot as Ely.
 
