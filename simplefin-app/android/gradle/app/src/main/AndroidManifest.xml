@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- SimpleFIN app: GpuiActivity (a NativeActivity from gpui-mobile) loads libsimplefin_app.so. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Vulkan feature declaration.
+         `required="false"` allows the app to fall back to OpenGL ES on
+         devices without Vulkan support. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.level"
+        android:required="false"
+        android:version="0"
+    />
+
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:required="false"
+        android:version="0x00401000"
+    />
+
+    <!-- GPU hardware acceleration is required for wgpu rendering. -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <!-- Touchscreen support (virtually all Android devices). -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false"
+    />
+
+    <application
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/GpuiTheme"
+    >
+
+        <!--
+          GpuiActivity extends NativeActivity and integrates the AndroidX
+          SplashScreen API.  The splash screen is held visible until the
+          Rust native library signals readiness via NATIVE_INITIALIZED.
+
+          The Android framework loads the specified native library and calls
+          ANativeActivity_onCreate(), which is defined in gpui_mobile::android::jni.
+          android-activity then calls android_main() in simplefin-app's
+          src/android.rs on its own thread.
+        -->
+        <activity
+            android:name="dev.gpui.mobile.GpuiActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:theme="@style/GpuiSplashTheme"
+            android:windowSoftInputMode="adjustResize"
+        >
+
+            <!-- The native library name WITHOUT the "lib" prefix and ".so" suffix.
+                 This is set via manifestPlaceholders in build.gradle.kts. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="${nativeLibraryName}"
+            />
+
+            <!-- Mark this activity as the main launcher entry point. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name="dev.gpui.mobile.GpuiPathPicker"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        />
+        <!-- Transparent helper Activity for file/image picker results. -->
+        <activity
+            android:name="dev.gpui.mobile.GpuiPickerActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        />
+
+        <!-- Transparent helper Activity for runtime permission requests. -->
+        <activity
+            android:name="dev.gpui.mobile.GpuiPermissionActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        />
+
+        <!-- Transparent helper Activity for biometric authentication (BiometricPrompt). -->
+        <activity
+            android:name="dev.gpui.mobile.GpuiAuthActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        />
+
+    </application>
+
+</manifest>

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::Account;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Anomaly {
     BalanceDroppedToZero {

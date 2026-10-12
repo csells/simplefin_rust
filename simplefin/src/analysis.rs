@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::storage::{BalanceSnapshot, ClassificationField, DataConfig, UnifiedAccount};
+use crate::storage::{
+    BalanceSnapshot, ClassificationField, DataConfig, TransactionWithContext, UnifiedAccount,
+};
 
 /// Standard account categories for net worth reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -134,14 +136,36 @@ pub struct NetWorthSummary {
 
 /// Returns true if this account should be excluded based on config patterns or IDs.
 fn is_excluded(account: &UnifiedAccount, config: &DataConfig) -> bool {
-    if config.excluded_account_ids.contains(&account.id) {
+    is_excluded_parts(&account.id, &account.name, config)
+}
+
+fn is_excluded_parts(id: &str, name: &str, config: &DataConfig) -> bool {
+    if config.excluded_account_ids.iter().any(|x| x == id) {
         return true;
     }
-    let lower_name = account.name.to_lowercase();
+    let lower_name = name.to_lowercase();
     config
         .excluded_account_patterns
         .iter()
         .any(|pattern| lower_name.contains(&pattern.to_lowercase()))
+}
+
+/// Whether a transaction's account is excluded via config (IDs or name patterns).
+pub fn transaction_account_excluded(txn: &TransactionWithContext, config: &DataConfig) -> bool {
+    is_excluded_parts(&txn.account_id, &txn.account_name, config)
+}
+
+/// Effective classification of an account (ID override > rules > heuristic).
+pub fn account_category(account: &UnifiedAccount, config: &DataConfig) -> AccountCategory {
+    classify_with_config(account, config)
+}
+
+/// Effective classification of the account a transaction belongs to.
+pub fn transaction_account_category(
+    txn: &TransactionWithContext,
+    config: &DataConfig,
+) -> AccountCategory {
+    classify_parts(&txn.account_id, &txn.account_name, &txn.org_name, config)
 }
 
 /// Returns the display name for an account, falling back to the original name.
@@ -234,12 +258,16 @@ fn is_classification_confident(name: &str, org_name: &str, category: AccountCate
 /// Classify an account, respecting config overrides and rules.
 /// Priority: ID override > classification rules > heuristic classifier.
 fn classify_with_config(account: &UnifiedAccount, config: &DataConfig) -> AccountCategory {
-    if let Some(&cat) = config.classification_overrides.get(&account.id) {
+    classify_parts(&account.id, &account.name, &account.org_name, config)
+}
+
+fn classify_parts(id: &str, name: &str, org_name: &str, config: &DataConfig) -> AccountCategory {
+    if let Some(&cat) = config.classification_overrides.get(id) {
         return cat;
     }
 
-    let lower_name = account.name.to_lowercase();
-    let lower_org = account.org_name.to_lowercase();
+    let lower_name = name.to_lowercase();
+    let lower_org = org_name.to_lowercase();
     for rule in &config.classification_rules {
         let lower_pattern = rule.pattern.to_lowercase();
         let matches = match rule.field {
@@ -251,7 +279,7 @@ fn classify_with_config(account: &UnifiedAccount, config: &DataConfig) -> Accoun
         }
     }
 
-    classify_account(&account.name, &account.org_name)
+    classify_account(name, org_name)
 }
 
 /// Compute net worth grouped by standard categories.
@@ -295,7 +323,7 @@ pub fn compute_net_worth_detail(
     // Sort accounts within each category by absolute balance descending
     if detail {
         for accounts in accounts_by_category.values_mut() {
-            accounts.sort_by(|a, b| b.balance.abs().cmp(&a.balance.abs()));
+            accounts.sort_by_key(|a| std::cmp::Reverse(a.balance.abs()));
         }
     }
 
@@ -358,6 +386,49 @@ pub struct NetWorthTimePoint {
     pub total_liabilities: Decimal,
 }
 
+/// Distinct snapshot timestamps, ascending, keeping only the last `n`.
+fn last_timestamps(snapshots: &[BalanceSnapshot], n: usize) -> Vec<i64> {
+    let mut timestamps: Vec<i64> = snapshots.iter().map(|s| s.timestamp).collect();
+    timestamps.sort();
+    timestamps.dedup();
+    let start = timestamps.len().saturating_sub(n);
+    timestamps.split_off(start)
+}
+
+/// Accounts with balances reconstructed at `timestamp`: each account takes its
+/// most recent snapshot at or before that time, or zero if none exists yet.
+pub fn reconstruct_accounts_at(
+    snapshots: &[BalanceSnapshot],
+    accounts: &[UnifiedAccount],
+    timestamp: i64,
+) -> Vec<UnifiedAccount> {
+    accounts
+        .iter()
+        .map(|account| {
+            let balance = snapshots
+                .iter()
+                .filter(|s| s.account_id == account.id && s.timestamp <= timestamp)
+                .max_by_key(|s| s.timestamp)
+                .map(|s| s.balance)
+                .unwrap_or(Decimal::ZERO);
+            UnifiedAccount {
+                balance,
+                ..account.clone()
+            }
+        })
+        .collect()
+}
+
+/// Net worth summary as of `timestamp`, reconstructed from snapshots.
+pub fn net_worth_at(
+    snapshots: &[BalanceSnapshot],
+    accounts: &[UnifiedAccount],
+    config: &DataConfig,
+    timestamp: i64,
+) -> NetWorthSummary {
+    compute_net_worth(&reconstruct_accounts_at(snapshots, accounts, timestamp), config)
+}
+
 /// Compute net worth at each of the last N distinct snapshot timestamps.
 ///
 /// For each timestamp, reconstructs account balances using the most recent
@@ -368,40 +439,10 @@ pub fn compute_net_worth_history(
     config: &DataConfig,
     n: usize,
 ) -> Vec<NetWorthTimePoint> {
-    // Extract distinct timestamps, sorted
-    let mut timestamps: Vec<i64> = snapshots.iter().map(|s| s.timestamp).collect();
-    timestamps.sort();
-    timestamps.dedup();
-
-    // Take the last N
-    let start = if timestamps.len() > n {
-        timestamps.len() - n
-    } else {
-        0
-    };
-    let timestamps = &timestamps[start..];
-
-    timestamps
-        .iter()
-        .map(|&ts| {
-            // For each account, find the most recent snapshot at or before this timestamp
-            let reconstructed: Vec<UnifiedAccount> = accounts
-                .iter()
-                .map(|account| {
-                    let balance = snapshots
-                        .iter()
-                        .filter(|s| s.account_id == account.id && s.timestamp <= ts)
-                        .max_by_key(|s| s.timestamp)
-                        .map(|s| s.balance)
-                        .unwrap_or(Decimal::ZERO);
-                    UnifiedAccount {
-                        balance,
-                        ..account.clone()
-                    }
-                })
-                .collect();
-
-            let summary = compute_net_worth(&reconstructed, config);
+    last_timestamps(snapshots, n)
+        .into_iter()
+        .map(|ts| {
+            let summary = net_worth_at(snapshots, accounts, config, ts);
             NetWorthTimePoint {
                 timestamp: ts,
                 net_worth: summary.net_worth,
@@ -410,6 +451,86 @@ pub fn compute_net_worth_history(
             }
         })
         .collect()
+}
+
+/// Total of one account category at a point in time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CategoryTimePoint {
+    pub timestamp: i64,
+    pub total: Decimal,
+}
+
+fn category_total(summary: &NetWorthSummary, category: AccountCategory) -> Decimal {
+    summary
+        .categories
+        .iter()
+        .find(|c| c.category == category)
+        .map(|c| c.total)
+        .unwrap_or(Decimal::ZERO)
+}
+
+/// Per-category balance history at each of the last N distinct snapshot timestamps.
+pub fn compute_category_history(
+    snapshots: &[BalanceSnapshot],
+    accounts: &[UnifiedAccount],
+    config: &DataConfig,
+    category: AccountCategory,
+    n: usize,
+) -> Vec<CategoryTimePoint> {
+    last_timestamps(snapshots, n)
+        .into_iter()
+        .map(|ts| CategoryTimePoint {
+            timestamp: ts,
+            total: category_total(&net_worth_at(snapshots, accounts, config, ts), category),
+        })
+        .collect()
+}
+
+/// Change in net worth (or one category's total) over a trailing window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NetWorthChange {
+    /// Requested window length in days.
+    pub days: u32,
+    /// Start of the window, clamped to the earliest snapshot.
+    pub start_timestamp: i64,
+    pub end_timestamp: i64,
+    pub start_value: Decimal,
+    pub end_value: Decimal,
+    pub change: Decimal,
+}
+
+/// Change over the `days` before `now` (for example, 1-day and 90-day chips).
+///
+/// Values are net worth, or the total of `category` when given. When history
+/// is shorter than the window, the window starts at the earliest snapshot.
+/// Returns `None` when there are no snapshots.
+pub fn compute_net_worth_change(
+    snapshots: &[BalanceSnapshot],
+    accounts: &[UnifiedAccount],
+    config: &DataConfig,
+    now: i64,
+    days: u32,
+    category: Option<AccountCategory>,
+) -> Option<NetWorthChange> {
+    let earliest = snapshots.iter().map(|s| s.timestamp).min()?;
+    let start_timestamp = (now - i64::from(days) * 86_400).max(earliest);
+    let value_at = |ts: i64| {
+        let summary = net_worth_at(snapshots, accounts, config, ts);
+        match category {
+            Some(cat) => category_total(&summary, cat),
+            None => summary.net_worth,
+        }
+    };
+    let start_value = value_at(start_timestamp);
+    let end_value = value_at(now);
+    Some(NetWorthChange {
+        days,
+        start_timestamp,
+        end_timestamp: now,
+        start_value,
+        end_value,
+        change: end_value - start_value,
+    })
 }
 
 /// A balance change for a single account between two points in time.

@@ -1,10 +1,12 @@
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::spending::{SpendingRule, category_label, classify_transaction};
+use crate::categories::{CategoryKind, Categorizer};
+use crate::month::YearMonth;
+use crate::spending::category_label;
 use crate::storage::TransactionWithContext;
 
 /// Direction of a spending trend.
@@ -67,8 +69,7 @@ pub struct TrendsSummary {
 
 /// Convert an epoch timestamp to a "YYYY-MM" period string.
 fn epoch_to_period(ts: i64) -> String {
-    let dt = Utc.timestamp_opt(ts, 0).unwrap();
-    format!("{:04}-{:02}", dt.year(), dt.month())
+    YearMonth::from_epoch(ts).to_string()
 }
 
 /// Compute the trend direction from a series of monthly totals.
@@ -107,10 +108,11 @@ fn compute_direction(months: &[MonthlyTotal]) -> (TrendDirection, Option<Decimal
 /// Compute spending trends over the last N months.
 ///
 /// Groups transactions by month and category, then analyzes the trend
-/// direction for each category and overall.
+/// direction for each category and overall. Only expense-kind categories are
+/// included; pending and user-hidden transactions are skipped.
 pub fn compute_trends(
     transactions: &[TransactionWithContext],
-    rules: &[SpendingRule],
+    categorizer: &Categorizer,
     months: usize,
 ) -> TrendsSummary {
     // Determine the cutoff timestamp for N months ago
@@ -126,13 +128,13 @@ pub fn compute_trends(
     let mut by_period: HashMap<String, (Decimal, usize)> = HashMap::new();
 
     for txn in transactions {
-        if txn.pending || txn.posted < cutoff_ts {
+        if txn.pending || txn.posted < cutoff_ts || categorizer.is_hidden(txn) {
             continue;
         }
 
-        // Only count spending (negative amounts), skip income/transfers for trend analysis
-        let category = classify_transaction(&txn.description, rules);
-        if category == "income" || category == "transfer" {
+        // Only expense categories count; income and transfers are excluded.
+        let category = categorizer.category(txn);
+        if categorizer.kind_of(&category) != CategoryKind::Expense {
             continue;
         }
 
@@ -205,7 +207,7 @@ pub fn compute_trends(
         .collect();
 
     // Sort by absolute monthly average descending
-    categories.sort_by(|a, b| b.monthly_average.abs().cmp(&a.monthly_average.abs()));
+    categories.sort_by_key(|c| std::cmp::Reverse(c.monthly_average.abs()));
 
     let overall_monthly_average = if monthly_totals.is_empty() {
         Decimal::ZERO
@@ -240,6 +242,7 @@ mod tests {
             description: description.to_string(),
             transacted_at: None,
             pending: false,
+            ..Default::default()
         }
     }
 
@@ -259,7 +262,11 @@ mod tests {
             make_txn("RESTAURANT", Decimal::new(-2500, 2), now - 5 * day),
         ];
 
-        let summary = compute_trends(&txns, &crate::spending::default_spending_patterns(), 6);
+        let summary = compute_trends(
+            &txns,
+            &Categorizer::from_rules(crate::spending::default_spending_patterns()),
+            6,
+        );
         assert!(!summary.monthly_totals.is_empty());
         // Total should be -75.00
         let total: Decimal = summary.monthly_totals.iter().map(|m| m.total).sum();
@@ -275,7 +282,11 @@ mod tests {
             make_txn("GROCERY STORE", Decimal::new(-5000, 2), now - 86400),
         ];
 
-        let summary = compute_trends(&txns, &crate::spending::default_spending_patterns(), 6);
+        let summary = compute_trends(
+            &txns,
+            &Categorizer::from_rules(crate::spending::default_spending_patterns()),
+            6,
+        );
         // Only grocery should appear in trends (income and transfer excluded)
         let total: Decimal = summary.monthly_totals.iter().map(|m| m.total).sum();
         assert_eq!(total, Decimal::new(-5000, 2));

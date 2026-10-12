@@ -6,7 +6,6 @@ description = "Rust client library for the SimpleFIN API bridge"
 repository = "https://github.com/csells/simplefin_rust"
 
 [dependencies]
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", features = ["tls", "tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str", "serde-with-arbitrary-precision"] }
@@ -17,6 +16,20 @@ url = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 indexmap = "2"
 percent-encoding = "2"
+
+# `Utc::now()` needs the JS clock in the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "wasmbind"] }
+
+# Native HTTP (the `clients` module) only; on wasm32 the host supplies the
+# transport. TLS trust roots: the OS store on desktop; bundled Mozilla roots on
+# Android/iOS, where rustls-native-certs cannot find a store. asupersync's
+# HttpClient uses webpki roots whenever native roots are not enabled.
+[target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", features = ["tls", "tls-native-roots"] }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", features = ["tls", "tls-webpki-roots"] }
 
 [dev-dependencies]
 tempfile = "3"

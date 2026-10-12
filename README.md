@@ -13,12 +13,16 @@ from the [Dart implementation](https://github.com/csells/simplefin_dart).
 
 ## Project Structure
 
-This is a Cargo workspace with two crates:
+This is a Cargo workspace with three crates:
 
-- **`simplefin/`** -- Library crate. API client, data models, storage, and
-  analysis (account classification, net worth computation, change detection).
+- **`simplefin/`** -- Library crate. API client, data models, storage, the
+  shared collection pipeline, and analysis (account classification, net worth
+  and deltas, spending, cash flow, budgets, recurring expenses, trends, and a
+  transaction query layer with per-transaction user edits).
 - **`simplefin-cli/`** -- Binary crate (`simplefin` executable). CLI for setup,
   data collection, manual balance entry, querying, and net worth summaries.
+- **`simplefin-app/`** -- Personal finance app (web, Android and desktop)
+  built with GPUI and Ely. See [simplefin-app/README.md](simplefin-app/README.md).
 
 ## Getting Started
 
@@ -368,9 +372,52 @@ let summary = compute_net_worth(&unified, &config);
 println!("Net worth: {}", summary.net_worth);
 ```
 
+### Collection, edits, cash flow and budgets
+
+- `collect_data(fetcher, storage, now, on_event)` (`sync.rs`) is the
+  collection pipeline the CLI's `collect` uses. It fetches through the
+  transport-independent `AccountFetcher` trait (natively,
+  `access_client.fetcher(cx)`), returns a `CollectReport`, and reports progress
+  through `CollectEvent` callbacks instead of printing.
+- `Categorizer` applies one precedence everywhere: per-transaction edit, then
+  user spending rules, then patterns. `TransactionEdits` (`edits.rs`) store
+  renames, category overrides and "hidden" flags in `transaction_edits.json`,
+  so edits survive re-collection. `apply_category_to_future()` turns an edit
+  into a user spending rule for the merchant.
+- `CategoryKind` (Income, Expense, Transfer): "income" and "transfer" default
+  to their kinds and everything else is an expense; override per category with
+  `category_kinds` in `config.json`.
+- `compute_cash_flow()` (`cashflow.rs`) gives monthly income, expense and net,
+  excluding pending, hidden, transfers, loan accounts and excluded accounts.
+- `compute_budget_status()` (`budget.rs`) compares this month's spending with
+  the `budget` limits in `config.json`, with pacing, last-month comparison, top
+  categories, 3- and 12-month averages, and a suggested limit.
+- `compute_net_worth_change()` and `compute_category_history()` provide 1-day
+  and 90-day change chips and per-category series; `TransactionQuery`
+  (`query.rs`) searches and filters transactions with edits applied.
+
+Mobile builds (Android/iOS) use bundled webpki TLS roots; desktop builds use
+the OS certificate store.
+
+### Browser (wasm32) support
+
+The library also builds for `wasm32-unknown-unknown`. There the asupersync
+clients (`AccessClient`, `BridgeClient`) are unavailable; a host transport such
+as the browser's `fetch` sends the requests described by
+`AccessCredentials::accounts_request()` and `SetupToken::claim_request()` (an
+`HttpRequestSpec`: method, credential-free URL, headers including Basic Auth)
+and decodes them with `parse_accounts_response()` and `parse_claim_response()`.
+Map transport failures to `SimplefinError::Transport`. Use
+`JsonStorage::with_files(MemoryFiles::new())` for storage and persist
+`MemoryFiles::entries()` yourself (restore with `MemoryFiles::from_entries()`).
+
 ### Storage
 
-Data is stored as JSON files with atomic writes (write-to-tmp + rename):
+`JsonStorage` reads and writes through the `FileStore` trait (read, atomic
+write, list, remove on relative `/`-separated paths). `JsonStorage::open(dir)`
+uses `DiskFiles` (native only); `JsonStorage::with_files(files)` accepts any
+store, such as the in-memory `MemoryFiles`. On disk, data is stored as JSON
+files with atomic writes (write-to-tmp + rename):
 
 ```
 {storage_dir}/
@@ -379,7 +426,8 @@ Data is stored as JSON files with atomic writes (write-to-tmp + rename):
   transactions/{account}.json -- per-account transaction history
   manual_accounts.json       -- manually-tracked accounts (with refresh_days)
   balance_history/{account}.json -- balance snapshots over time
-  config.json                -- user-specific settings (exclusions, overrides)
+  config.json                -- user-specific settings (exclusions, overrides, category kinds, budget)
+  transaction_edits.json     -- per-transaction edits (rename, category, hidden)
   spending_patterns.json     -- spending classification patterns (seeded from defaults)
   warnings.json              -- anomalies and bridge messages from last collection
   state.json                 -- incremental collection bookmarks
@@ -420,7 +468,7 @@ the LLM's head.
 ```bash
 cargo build          # Build library + CLI
 cargo clippy         # Lint (zero warnings required)
-cargo test           # Run all tests (277 currently)
+cargo test -p simplefin -p simplefin-cli  # Run library + CLI tests (357 currently)
 ```
 
 ## Resources

@@ -4,3 +4,9 @@
 .vscode/
 /data/
 .claude/settings.local.json
+
+# simplefin-app Android build outputs
+/simplefin-app/android/gradle/.gradle/
+/simplefin-app/android/gradle/app/build/
+/simplefin-app/android/gradle/app/src/main/jniLibs/
+/simplefin-app/android/gradle/local.properties

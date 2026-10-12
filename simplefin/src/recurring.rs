@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::spending::{SpendingRule, classify_transaction};
+use crate::categories::{Categorizer, CategoryKind};
 use crate::storage::TransactionWithContext;
 
 /// A detected recurring expense.
@@ -40,7 +40,7 @@ pub struct RecurringSummary {
 /// Normalize a transaction description to group similar transactions.
 ///
 /// Strips common POS prefixes, trailing numbers/IDs, and normalizes whitespace.
-fn normalize_merchant(description: &str) -> String {
+pub fn normalize_merchant(description: &str) -> String {
     let mut s = description.to_uppercase();
 
     // Strip common POS/card prefixes
@@ -87,16 +87,23 @@ fn normalize_merchant(description: &str) -> String {
 ///
 /// Groups transactions by normalized merchant name, then checks if they
 /// occur at regular intervals. Returns expenses sorted by estimated monthly cost.
+/// Pending and user-hidden transactions are skipped. Grouping uses the original
+/// provider description so renaming one occurrence does not split a series.
 pub fn detect_recurring(
     transactions: &[TransactionWithContext],
-    rules: &[SpendingRule],
+    categorizer: &Categorizer,
     min_occurrences: usize,
 ) -> RecurringSummary {
     // Group by normalized merchant
     let mut by_merchant: HashMap<String, Vec<&TransactionWithContext>> = HashMap::new();
 
     for txn in transactions {
-        if txn.pending {
+        // Recurring *expenses*: money going out that isn't income.
+        if txn.pending
+            || categorizer.is_hidden(txn)
+            || txn.amount >= Decimal::ZERO
+            || categorizer.kind(txn) == CategoryKind::Income
+        {
             continue;
         }
         let merchant = normalize_merchant(&txn.description);
@@ -148,7 +155,8 @@ pub fn detect_recurring(
 
         let frequency_days = median_days as u32;
         let frequency_label = match frequency_days {
-            0..=10 => "weekly".to_string(),
+            0..=3 => "daily".to_string(),
+            4..=10 => "weekly".to_string(),
             11..=45 => "monthly".to_string(),
             46..=100 => "quarterly".to_string(),
             101..=200 => "semi-annually".to_string(),
@@ -165,8 +173,7 @@ pub fn detect_recurring(
             None
         };
 
-        let category =
-            classify_transaction(&txns[0].description, rules);
+        let category = categorizer.category(txns[0]);
 
         recurring.push(RecurringExpense {
             merchant,
@@ -182,7 +189,7 @@ pub fn detect_recurring(
     }
 
     // Sort by absolute average amount descending (biggest expenses first)
-    recurring.sort_by(|a, b| b.average_amount.abs().cmp(&a.average_amount.abs()));
+    recurring.sort_by_key(|r| std::cmp::Reverse(r.average_amount.abs()));
 
     // Estimate monthly total: sum of (average_amount * 30 / frequency_days)
     let estimated_monthly_total = recurring
@@ -215,6 +222,7 @@ mod tests {
             description: description.to_string(),
             transacted_at: None,
             pending: false,
+            ..Default::default()
         }
     }
 
@@ -243,7 +251,7 @@ mod tests {
             })
             .collect();
 
-        let summary = detect_recurring(&txns, &[], 2);
+        let summary = detect_recurring(&txns, &Categorizer::default(), 2);
         assert_eq!(summary.recurring.len(), 1);
         assert_eq!(summary.recurring[0].merchant, "NETFLIX");
         assert_eq!(summary.recurring[0].occurrences, 4);
@@ -262,7 +270,7 @@ mod tests {
             make_txn("RANDOM VENDOR", Decimal::new(-2000, 2), base + 98 * day),
         ];
 
-        let summary = detect_recurring(&txns, &[], 2);
+        let summary = detect_recurring(&txns, &Categorizer::default(), 2);
         // Should not detect as recurring due to inconsistent intervals
         assert!(
             summary.recurring.is_empty(),
@@ -279,10 +287,10 @@ mod tests {
             make_txn("HULU", Decimal::new(-1299, 2), base + 30 * day),
         ];
 
-        let summary = detect_recurring(&txns, &[], 3);
+        let summary = detect_recurring(&txns, &Categorizer::default(), 3);
         assert!(summary.recurring.is_empty());
 
-        let summary = detect_recurring(&txns, &[], 2);
+        let summary = detect_recurring(&txns, &Categorizer::default(), 2);
         assert_eq!(summary.recurring.len(), 1);
     }
 }

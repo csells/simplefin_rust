@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 use simplefin::{
-    AccessClient, AccessCredentials, AccountQueryParams, BalanceHistoryFilter, BridgeClient,
-    JsonStorage, ManualAccount, SimplefinError, Storage, TransactionFilter, WarningRecord,
+    AccessClient, AccessCredentials, BalanceHistoryFilter, BridgeClient, CollectEvent,
+    DiskFiles, JsonStorage, ManualAccount, SimplefinError, Storage, TransactionFilter,
     DEFAULT_BRIDGE_ROOT_URL,
 };
 
@@ -619,27 +619,16 @@ async fn handle_collect(
     let credentials = AccessCredentials::parse(access_url)?;
     let client = AccessClient::new(credentials, None);
     let mut storage = JsonStorage::open(storage_path)?;
+    let now = chrono::Utc::now().timestamp();
 
-    // Load previous accounts for anomaly detection
-    let previous_accounts = storage.get_accounts(&simplefin::AccountFilter::default())?;
+    let report = simplefin::collect_data(&client.fetcher(cx), &mut storage, now, &mut |event| {
+        if let Some(line) = collect_event_line(event, verbose) {
+            eprintln!("{line}");
+        }
+    })
+    .await?;
 
-    // Fetch all accounts with balances to know what we have
-    let balances_params = AccountQueryParams {
-        balances_only: true,
-        ..Default::default()
-    };
-    let account_set = client.get_accounts(cx, &balances_params).await?;
-
-    // Collect bridge messages for persistence
-    let mut all_bridge_messages: Vec<String> = Vec::new();
-
-    // Surface any messages from the bridge
-    for msg in &account_set.server_messages {
-        eprintln!("Bridge: {msg}");
-        all_bridge_messages.push(msg.clone());
-    }
-
-    if account_set.accounts.is_empty() {
+    if report.accounts_returned == 0 {
         return Ok(CommandOutput {
             data: serde_json::json!({
                 "new_transactions": 0,
@@ -652,134 +641,18 @@ async fn handle_collect(
         });
     }
 
-    // Detect anomalies by comparing current vs previous accounts
-    let anomalies = if !previous_accounts.is_empty() {
-        let detected =
-            simplefin::detect_anomalies(&account_set.accounts, &previous_accounts);
-        for anomaly in &detected {
-            eprintln!("{anomaly}");
-        }
-        detected
-    } else {
-        Vec::new()
-    };
-
-    // Upsert organizations
-    let orgs: Vec<_> = account_set
-        .accounts
-        .iter()
-        .map(|a| a.org.clone())
-        .collect();
-    storage.upsert_organizations(&orgs)?;
-
-    // Upsert accounts and record balance snapshots
-    storage.upsert_accounts(&account_set.accounts)?;
-    let now = chrono::Utc::now().timestamp();
-    for account in &account_set.accounts {
-        storage.record_balance(&account.id, now, account.balance)?;
-    }
-
-    // Fetch transactions for each account
-    let mut total_new = 0usize;
-    let mut total_dupes = 0usize;
-    let mut account_count = 0usize;
-
-    for account in &account_set.accounts {
-        // Determine the start date for incremental fetching.
-        // If state is 0 (corrupted) but we have stored transactions, recover from
-        // the latest stored transaction timestamp instead of re-fetching from epoch.
-        let state_ts = storage.last_collected(&account.id)?;
-        let start_date = match state_ts {
-            Some(ts) if ts > 0 => Some(ts),
-            _ => {
-                // State is missing or zero — try to recover from stored transactions
-                let recovered = storage.max_stored_posted(&account.id)?;
-                if let Some(ts) = recovered {
-                    // Fix the corrupted state while we're at it
-                    storage.set_last_collected(&account.id, ts)?;
-                    if verbose {
-                        eprintln!(
-                            "  {}: recovered sync state from stored transactions ({})",
-                            account.name, ts
-                        );
-                    }
-                }
-                recovered.or(Some(0))
-            }
-        };
-
-        let params = AccountQueryParams {
-            start_date,
-            include_pending: true,
-            account_ids: Some(vec![account.id.clone()]),
-            balances_only: false,
-            ..Default::default()
-        };
-
-        let result = client.get_accounts(cx, &params).await?;
-
-        for msg in &result.server_messages {
-            eprintln!("Bridge ({}): {msg}", account.name);
-            all_bridge_messages.push(format!("{}: {msg}", account.name));
-        }
-
-        for fetched_account in &result.accounts {
-            let txn_count = fetched_account.transactions.len();
-            let new_count =
-                storage.upsert_transactions(&fetched_account.id, &fetched_account.transactions)?;
-            let dupe_count = txn_count - new_count;
-
-            // Only consider non-pending transactions with valid timestamps for state.
-            // Pending transactions may have posted=0, which would corrupt the state.
-            if let Some(max_posted) = fetched_account
-                .transactions
-                .iter()
-                .filter(|t| !t.pending && t.posted > 0)
-                .map(|t| t.posted)
-                .max()
-            {
-                // Never let state go backwards — only advance forward.
-                let current = storage.last_collected(&fetched_account.id)?;
-                if current.is_none_or(|ts| max_posted > ts) {
-                    storage.set_last_collected(&fetched_account.id, max_posted)?;
-                }
-            }
-
-            if verbose {
-                eprintln!(
-                    "  {}: {} new, {} existing",
-                    fetched_account.name, new_count, dupe_count
-                );
-            }
-
-            total_new += new_count;
-            total_dupes += dupe_count;
-            account_count += 1;
-        }
-    }
-
-    // Persist warnings for later retrieval by status/summary
-    let warning_record = WarningRecord {
-        timestamp: now,
-        anomalies,
-        bridge_messages: all_bridge_messages,
-    };
-    storage.save_warnings(&warning_record)?;
-
-    let is_first_run = previous_accounts.is_empty();
-
     let mut data = serde_json::json!({
-        "new_transactions": total_new,
-        "accounts": account_count,
-        "duplicates_skipped": total_dupes,
-        "first_run": is_first_run,
+        "new_transactions": report.new_transactions,
+        "accounts": report.accounts,
+        "duplicates_skipped": report.duplicates_skipped,
+        "first_run": report.first_run,
         "message": format!(
             "Collected {} new transactions across {} accounts ({} duplicates skipped)",
-            total_new, account_count, total_dupes
+            report.new_transactions, report.accounts, report.duplicates_skipped
         )
     });
 
-    if is_first_run {
+    if report.first_run {
         data["hint"] = serde_json::json!(
             "First collection complete. Run 'simplefin configure --list' to review account classifications."
         );
@@ -791,6 +664,35 @@ async fn handle_collect(
         storage_path: Some(storage_path.to_string()),
         kind: CommandKind::Message,
     })
+}
+
+/// Render a collection progress event as a stderr line. Per-account progress
+/// is only shown in verbose mode; bridge messages and anomalies always are.
+fn collect_event_line(event: &CollectEvent, verbose: bool) -> Option<String> {
+    match event {
+        CollectEvent::BridgeMessage {
+            account_name: None,
+            message,
+        } => Some(format!("Bridge: {message}")),
+        CollectEvent::BridgeMessage {
+            account_name: Some(name),
+            message,
+        } => Some(format!("Bridge ({name}): {message}")),
+        CollectEvent::Anomaly(anomaly) => Some(anomaly.to_string()),
+        CollectEvent::SyncStateRecovered {
+            account_name,
+            timestamp,
+        } => verbose.then(|| {
+            format!("  {account_name}: recovered sync state from stored transactions ({timestamp})")
+        }),
+        CollectEvent::AccountCollected {
+            account_name,
+            new_transactions,
+            existing_transactions,
+        } => verbose.then(|| {
+            format!("  {account_name}: {new_transactions} new, {existing_transactions} existing")
+        }),
+    }
 }
 
 fn handle_query(
@@ -904,7 +806,6 @@ fn handle_spending(
     end_date: Option<&str>,
 ) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
-    let config = storage.get_config()?;
 
     let start = start_date.map(parse_date).transpose()?;
     let end = end_date.map(parse_date).transpose()?;
@@ -916,12 +817,9 @@ fn handle_spending(
         ..Default::default()
     })?;
 
-    // User rules (from config) take priority, then patterns from storage
-    let patterns = storage.get_spending_patterns()?;
-    let mut rules = config.spending_rules.clone();
-    rules.extend(patterns);
-
-    let summary = simplefin::compute_spending(&transactions, &rules);
+    // Edits > user rules (config) > patterns, shared with every analysis.
+    let categorizer = simplefin::Categorizer::load(&storage)?;
+    let summary = simplefin::compute_spending(&transactions, &categorizer);
 
     Ok(CommandOutput {
         data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
@@ -1066,10 +964,16 @@ fn handle_status(storage_path: &str) -> simplefin::Result<CommandOutput> {
 
 fn handle_cleanup(storage_path: &str, remove: bool) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
-    let orphans = storage.find_orphaned_data()?;
+    let mut orphans = storage.find_orphaned_data()?;
 
     if remove && !orphans.is_empty() {
         storage.remove_orphaned_data(&orphans)?;
+    }
+
+    // Report on-disk locations rather than store-relative paths.
+    let files = DiskFiles::new(storage_path);
+    for orphan in &mut orphans {
+        orphan.path = files.path_of(&orphan.path).to_string_lossy().to_string();
     }
 
     Ok(CommandOutput {
@@ -1110,8 +1014,7 @@ fn handle_spending_rules(
         let cat_str = category.ok_or_else(|| {
             SimplefinError::InvalidArgument("--category is required when adding a pattern".into())
         })?;
-        // Normalize: lowercase, spaces to underscores
-        let cat = cat_str.to_lowercase().replace(' ', "_");
+        let cat = simplefin::normalize_category_name(cat_str);
         let mut patterns = storage.get_spending_patterns()?;
         patterns.insert(
             0,
@@ -1176,18 +1079,14 @@ fn handle_recurring(
     min_occurrences: usize,
 ) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
-    let config = storage.get_config()?;
 
     let transactions = storage.get_transactions(&TransactionFilter {
         include_pending: Some(false),
         ..Default::default()
     })?;
 
-    let patterns = storage.get_spending_patterns()?;
-    let mut rules = config.spending_rules.clone();
-    rules.extend(patterns);
-
-    let summary = simplefin::detect_recurring(&transactions, &rules, min_occurrences);
+    let categorizer = simplefin::Categorizer::load(&storage)?;
+    let summary = simplefin::detect_recurring(&transactions, &categorizer, min_occurrences);
 
     Ok(CommandOutput {
         data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
@@ -1201,18 +1100,14 @@ fn handle_recurring(
 
 fn handle_trends(storage_path: &str, months: usize) -> simplefin::Result<CommandOutput> {
     let storage = JsonStorage::open(storage_path)?;
-    let config = storage.get_config()?;
 
     let transactions = storage.get_transactions(&TransactionFilter {
         include_pending: Some(false),
         ..Default::default()
     })?;
 
-    let patterns = storage.get_spending_patterns()?;
-    let mut rules = config.spending_rules.clone();
-    rules.extend(patterns);
-
-    let summary = simplefin::compute_trends(&transactions, &rules, months);
+    let categorizer = simplefin::Categorizer::load(&storage)?;
+    let summary = simplefin::compute_trends(&transactions, &categorizer, months);
 
     Ok(CommandOutput {
         data: serde_json::to_value(&summary).map_err(|e| SimplefinError::Storage {
@@ -1268,4 +1163,86 @@ fn handle_schema(output_type: &str) -> simplefin::Result<CommandOutput> {
         storage_path: None,
         kind: CommandKind::Schema,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bridge(account_name: Option<&str>, message: &str) -> CollectEvent {
+        CollectEvent::BridgeMessage {
+            account_name: account_name.map(String::from),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn bridge_messages_always_print() {
+        assert_eq!(
+            collect_event_line(&bridge(None, "Hello"), false).as_deref(),
+            Some("Bridge: Hello")
+        );
+        assert_eq!(
+            collect_event_line(&bridge(Some("Checking (1234)"), "Slow"), false).as_deref(),
+            Some("Bridge (Checking (1234)): Slow")
+        );
+    }
+
+    #[test]
+    fn anomalies_always_print() {
+        let anomaly = simplefin::Anomaly::NewAccount {
+            account_id: "a1".into(),
+            account_name: "Checking (1234)".into(),
+            balance: Decimal::ONE,
+        };
+        let line = collect_event_line(&CollectEvent::Anomaly(anomaly.clone()), false);
+        assert_eq!(line, Some(anomaly.to_string()));
+    }
+
+    #[test]
+    fn per_account_progress_prints_only_when_verbose() {
+        let collected = CollectEvent::AccountCollected {
+            account_name: "Checking (1234)".into(),
+            new_transactions: 2,
+            existing_transactions: 3,
+        };
+        let recovered = CollectEvent::SyncStateRecovered {
+            account_name: "Checking (1234)".into(),
+            timestamp: 42,
+        };
+        assert_eq!(collect_event_line(&collected, false), None);
+        assert_eq!(collect_event_line(&recovered, false), None);
+        assert_eq!(
+            collect_event_line(&collected, true).as_deref(),
+            Some("  Checking (1234): 2 new, 3 existing")
+        );
+        assert_eq!(
+            collect_event_line(&recovered, true).as_deref(),
+            Some("  Checking (1234): recovered sync state from stored transactions (42)")
+        );
+    }
+
+    #[test]
+    fn cleanup_reports_on_disk_paths_and_removes_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let mut storage = JsonStorage::open(root).unwrap();
+        storage.record_balance("orphan", 1_700_000_000, Decimal::ONE).unwrap();
+
+        let dry_run = handle_cleanup(root, false).unwrap();
+        let expected = dir
+            .path()
+            .join("balance_history")
+            .join("orphan.json")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(dry_run.data["orphaned_files"], 1);
+        assert_eq!(dry_run.data["removed"], false);
+        assert_eq!(dry_run.data["orphans"][0]["path"], expected);
+        assert!(dir.path().join("balance_history/orphan.json").is_file());
+
+        let removed = handle_cleanup(root, true).unwrap();
+        assert_eq!(removed.data["removed"], true);
+        assert!(!dir.path().join("balance_history/orphan.json").exists());
+    }
 }

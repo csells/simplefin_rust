@@ -39,6 +39,7 @@ fn test_transaction(id: &str, amount: &str, posted: i64) -> Transaction {
         description: format!("Transaction {id}"),
         transacted_at: None,
         pending: false,
+        ..Default::default()
     }
 }
 
@@ -55,8 +56,8 @@ fn upsert_organizations_idempotent() {
     let (_dir, mut storage) = open_temp_storage();
     let org = test_org("org1", "First National");
 
-    storage.upsert_organizations(&[org.clone()]).unwrap();
-    storage.upsert_organizations(&[org.clone()]).unwrap();
+    storage.upsert_organizations(std::slice::from_ref(&org)).unwrap();
+    storage.upsert_organizations(std::slice::from_ref(&org)).unwrap();
 
     let orgs = storage.get_organizations(&OrgFilter::default()).unwrap();
     assert_eq!(orgs.len(), 1);
@@ -83,8 +84,8 @@ fn upsert_accounts_idempotent() {
     let org = test_org("org1", "Bank");
     let account = test_account("acc1", "Checking", &org);
 
-    storage.upsert_accounts(&[account.clone()]).unwrap();
-    storage.upsert_accounts(&[account.clone()]).unwrap();
+    storage.upsert_accounts(std::slice::from_ref(&account)).unwrap();
+    storage.upsert_accounts(std::slice::from_ref(&account)).unwrap();
 
     let accounts = storage.get_accounts(&AccountFilter::default()).unwrap();
     assert_eq!(accounts.len(), 1);
@@ -523,7 +524,7 @@ fn upsert_manual_account_idempotent() {
         currency: "USD".to_string(),
         refresh_days: 1,
     };
-    storage.upsert_manual_accounts(&[manual.clone()]).unwrap();
+    storage.upsert_manual_accounts(std::slice::from_ref(&manual)).unwrap();
     storage.upsert_manual_accounts(&[manual]).unwrap();
 
     let accounts = storage.get_manual_accounts().unwrap();

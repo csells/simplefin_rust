@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#fcfaf7" />
+    <title>SimpleFIN</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #fcfaf7; }
+      /* GPUI draws the whole UI on a canvas; keep the browser from also
+         panning or zooming it so touches go to the app. */
+      body { touch-action: none; overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
+      #status { font: 15px -apple-system, system-ui, sans-serif; color: #6b6560; position: fixed; inset: 0;
+                display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+    </style>
+  </head>
+  <body>
+    <div id="status">Loading SimpleFIN…</div>
+    <script type="module">
+      import init from "./simplefin_app.js?v=__BUILD__";
+      const status = document.getElementById("status");
+      try {
+        await init({ module_or_path: "./simplefin_app_bg.wasm?v=__BUILD__" });
+        status.remove();
+      } catch (error) {
+        console.error("SimpleFIN failed to start", error);
+        status.textContent = "SimpleFIN couldn't start in this browser: " + error;
+      }
+    </script>
+  </body>
+</html>

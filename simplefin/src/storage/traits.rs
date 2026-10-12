@@ -34,7 +34,7 @@ pub struct TransactionFilter {
 }
 
 /// A transaction paired with context from its parent account and organization.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TransactionWithContext {
     pub id: String,
     pub account_id: String,
@@ -46,6 +46,10 @@ pub struct TransactionWithContext {
     pub description: String,
     pub transacted_at: Option<i64>,
     pub pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
 }
 
 /// A manually-tracked account not connected to SimpleFIN.
@@ -199,6 +203,15 @@ pub struct DataConfig {
     /// Account IDs to exclude from net worth calculations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_account_ids: Vec<String>,
+
+    /// Overrides for a spending category's kind (income, expense, transfer),
+    /// keyed by category name. Unlisted categories use the default kind.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub category_kinds: HashMap<String, crate::categories::CategoryKind>,
+
+    /// Monthly budget limits.
+    #[serde(default, skip_serializing_if = "crate::budget::BudgetConfig::is_empty")]
+    pub budget: crate::budget::BudgetConfig,
 }
 
 /// Orphaned data found during cleanup.
@@ -206,6 +219,8 @@ pub struct DataConfig {
 pub struct OrphanedData {
     pub account_id: String,
     pub data_type: OrphanedDataType,
+    /// Store-relative, `/`-separated path of the orphaned file
+    /// (e.g. `balance_history/{account_id}.json`).
     pub path: String,
 }
 
@@ -360,4 +375,10 @@ pub trait Storage {
 
     /// Save spending patterns to storage, replacing any existing patterns.
     fn set_spending_patterns(&self, patterns: &[crate::spending::SpendingRule]) -> Result<()>;
+
+    /// Load per-transaction user edits. Returns empty edits if none were saved.
+    fn get_transaction_edits(&self) -> Result<crate::edits::TransactionEdits>;
+
+    /// Save per-transaction user edits, replacing any existing edits.
+    fn set_transaction_edits(&self, edits: &crate::edits::TransactionEdits) -> Result<()>;
 }

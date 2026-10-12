@@ -3,8 +3,8 @@ use rust_decimal_macros::dec;
 use simplefin::{
     AccountCategory, AccountSource, BalanceSnapshot, ClassificationField, ClassificationRule,
     DataConfig, UnifiedAccount, account_is_excluded, classify_account, classify_for_display,
-    compute_changes, compute_net_worth, compute_net_worth_detail, compute_net_worth_history,
-    display_name_for,
+    compute_category_history, compute_changes, compute_net_worth, compute_net_worth_change,
+    compute_net_worth_detail, compute_net_worth_history, display_name_for, net_worth_at,
 };
 
 fn default_config() -> DataConfig {
@@ -698,4 +698,141 @@ fn history_excludes_configured_accounts() {
     assert_eq!(history.len(), 1);
     // Only acc2 counted
     assert_eq!(history[0].net_worth, dec!(3000));
+}
+
+// --- net worth deltas and per-category history ---
+
+const DAY: i64 = 86_400;
+
+fn snap(account_id: &str, timestamp: i64, balance: Decimal) -> BalanceSnapshot {
+    BalanceSnapshot {
+        account_id: account_id.to_string(),
+        timestamp,
+        balance,
+    }
+}
+
+fn delta_fixture() -> (Vec<UnifiedAccount>, Vec<BalanceSnapshot>) {
+    let accounts = vec![
+        make_account("chk", "Checking (1234)", "Bank", dec!(1500)),
+        make_account("card", "Rewards Visa (5678)", "Bank", dec!(-300)),
+    ];
+    let snapshots = vec![
+        snap("chk", 0, dec!(1000)),
+        snap("card", 0, dec!(-100)),
+        snap("chk", 89 * DAY, dec!(1400)),
+        snap("chk", 99 * DAY, dec!(1500)),
+        snap("card", 99 * DAY + 10, dec!(-300)),
+    ];
+    (accounts, snapshots)
+}
+
+#[test]
+fn net_worth_at_reconstructs_balances_at_a_time() {
+    let (accounts, snapshots) = delta_fixture();
+    let summary = net_worth_at(&snapshots, &accounts, &default_config(), 90 * DAY);
+    assert_eq!(summary.net_worth, dec!(1300));
+    assert_eq!(summary.total_assets, dec!(1400));
+    assert_eq!(summary.total_liabilities, dec!(-100));
+}
+
+#[test]
+fn one_day_change() {
+    let (accounts, snapshots) = delta_fixture();
+    let now = 100 * DAY;
+    let change =
+        compute_net_worth_change(&snapshots, &accounts, &default_config(), now, 1, None).unwrap();
+    assert_eq!(change.days, 1);
+    assert_eq!(change.start_timestamp, 99 * DAY);
+    assert_eq!(change.end_timestamp, now);
+    // At day 99 (exactly): chk 1500, card still -100.
+    assert_eq!(change.start_value, dec!(1400));
+    assert_eq!(change.end_value, dec!(1200));
+    assert_eq!(change.change, dec!(-200));
+}
+
+#[test]
+fn ninety_day_change() {
+    let (accounts, snapshots) = delta_fixture();
+    let change =
+        compute_net_worth_change(&snapshots, &accounts, &default_config(), 100 * DAY, 90, None)
+            .unwrap();
+    assert_eq!(change.start_value, dec!(900));
+    assert_eq!(change.change, dec!(300));
+}
+
+#[test]
+fn change_window_clamps_to_start_of_history() {
+    let (accounts, snapshots) = delta_fixture();
+    let change =
+        compute_net_worth_change(&snapshots, &accounts, &default_config(), 100 * DAY, 365, None)
+            .unwrap();
+    assert_eq!(change.start_timestamp, 0);
+    assert_eq!(change.start_value, dec!(900));
+}
+
+#[test]
+fn change_for_a_single_category() {
+    let (accounts, snapshots) = delta_fixture();
+    let change = compute_net_worth_change(
+        &snapshots,
+        &accounts,
+        &default_config(),
+        100 * DAY,
+        90,
+        Some(AccountCategory::CreditCards),
+    )
+    .unwrap();
+    assert_eq!(change.start_value, dec!(-100));
+    assert_eq!(change.end_value, dec!(-300));
+    assert_eq!(change.change, dec!(-200));
+}
+
+#[test]
+fn change_is_none_without_history() {
+    let (accounts, _) = delta_fixture();
+    assert!(compute_net_worth_change(&[], &accounts, &default_config(), 100, 1, None).is_none());
+}
+
+#[test]
+fn change_honors_exclusions() {
+    let (accounts, snapshots) = delta_fixture();
+    let mut config = default_config();
+    config.excluded_account_ids.push("card".into());
+    let change =
+        compute_net_worth_change(&snapshots, &accounts, &config, 100 * DAY, 90, None).unwrap();
+    assert_eq!(change.start_value, dec!(1000));
+    assert_eq!(change.end_value, dec!(1500));
+}
+
+#[test]
+fn category_history_series() {
+    let (accounts, snapshots) = delta_fixture();
+    let series = compute_category_history(
+        &snapshots,
+        &accounts,
+        &default_config(),
+        AccountCategory::Cash,
+        10,
+    );
+    let points: Vec<(i64, Decimal)> = series.iter().map(|p| (p.timestamp, p.total)).collect();
+    assert_eq!(
+        points,
+        vec![
+            (0, dec!(1000)),
+            (89 * DAY, dec!(1400)),
+            (99 * DAY, dec!(1500)),
+            (99 * DAY + 10, dec!(1500)),
+        ]
+    );
+
+    let last_two = compute_category_history(
+        &snapshots,
+        &accounts,
+        &default_config(),
+        AccountCategory::CreditCards,
+        2,
+    );
+    assert_eq!(last_two.len(), 2);
+    assert_eq!(last_two[1].total, dec!(-300));
 }

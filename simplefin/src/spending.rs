@@ -3,7 +3,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::storage::TransactionWithContext;
+use crate::categories::Categorizer;
+use crate::error::Result;
+use crate::storage::{DataConfig, Storage, TransactionWithContext};
 
 /// The fallback category name for unclassified transactions.
 pub const OTHER_CATEGORY: &str = "other";
@@ -225,14 +227,40 @@ pub fn classify_transaction(description: &str, rules: &[SpendingRule]) -> String
     OTHER_CATEGORY.to_string()
 }
 
+/// Combine user rules (from `config.json`, highest priority) with spending
+/// patterns into the priority order every classifier expects.
+pub fn assemble_spending_rules(config: &DataConfig, patterns: Vec<SpendingRule>) -> Vec<SpendingRule> {
+    let mut rules = config.spending_rules.clone();
+    rules.extend(patterns);
+    rules
+}
+
+/// Load user rules followed by spending patterns from storage.
+pub fn load_spending_rules(storage: &(impl Storage + ?Sized)) -> Result<Vec<SpendingRule>> {
+    let config = storage.get_config()?;
+    Ok(assemble_spending_rules(&config, storage.get_spending_patterns()?))
+}
+
+/// Insert a user spending rule at the highest priority, replacing any existing
+/// user rule with the same pattern (case-insensitive): a newer rule wins.
+pub fn add_user_spending_rule(config: &mut DataConfig, rule: SpendingRule) {
+    let key = rule.pattern.to_lowercase();
+    config
+        .spending_rules
+        .retain(|r| r.pattern.to_lowercase() != key);
+    config.spending_rules.insert(0, rule);
+}
+
 /// Compute spending summary from transactions.
 /// Spending = negative amounts (debits). Income = positive amounts (credits).
+/// Pending and user-hidden transactions are skipped; categories come from the
+/// categorizer (edit > user rules > patterns).
 ///
 /// Unclassified transaction descriptions (those falling into "Other") are collected
 /// in the `unclassified` field so the AI skill can ask the user about them.
 pub fn compute_spending(
     transactions: &[TransactionWithContext],
-    rules: &[SpendingRule],
+    categorizer: &Categorizer,
 ) -> SpendingSummary {
     let mut by_category: HashMap<String, (Decimal, usize)> = HashMap::new();
     let mut total_spending = Decimal::ZERO;
@@ -240,11 +268,11 @@ pub fn compute_spending(
     let mut unclassified: Vec<UnclassifiedTransaction> = Vec::new();
 
     for txn in transactions {
-        if txn.pending {
+        if txn.pending || categorizer.is_hidden(txn) {
             continue;
         }
 
-        let category = classify_transaction(&txn.description, rules);
+        let category = categorizer.category(txn);
 
         if category == OTHER_CATEGORY
             && !unclassified.iter().any(|u| u.description == txn.description)
@@ -277,7 +305,7 @@ pub fn compute_spending(
         .collect();
 
     // Sort by absolute total descending
-    categories.sort_by(|a, b| b.total.abs().cmp(&a.total.abs()));
+    categories.sort_by_key(|c| std::cmp::Reverse(c.total.abs()));
 
     SpendingSummary {
         categories,

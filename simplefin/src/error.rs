@@ -24,8 +24,14 @@ pub enum SimplefinError {
         response_body: String,
     },
 
+    /// Failure in the native asupersync HTTP client.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("HTTP error: {0}")]
     Http(#[from] asupersync::http::h1::ClientError),
+
+    /// Failure in a host-supplied transport (e.g. the browser's `fetch`).
+    #[error("transport error: {0}")]
+    Transport(String),
 
     #[error("{0}")]
     InvalidArgument(String),

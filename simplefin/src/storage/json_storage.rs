@@ -1,137 +1,133 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use crate::error::{Result, SimplefinError};
 use crate::models::{Account, Organization, Transaction};
 
 use rust_decimal::Decimal;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::file_store::DiskFiles;
+use super::file_store::FileStore;
 use super::traits::{
     AccountFilter, BalanceHistoryFilter, BalanceSnapshot, DataConfig, ManualAccount, OrgFilter,
     OrphanedData, OrphanedDataType, StaleAccount, Storage, TransactionFilter,
     TransactionWithContext, WarningRecord,
 };
 
-/// JSON-file-based storage backend.
-///
-/// Directory layout:
-/// ```text
-/// {root}/
-///   organizations.json    — Vec<Organization>
-///   accounts.json         — Vec<Account> (transactions always empty)
-///   transactions/
-///     {account_id}.json   — Vec<Transaction>
-///   state.json            — HashMap<account_id, last_collected_epoch>
-///   balance_verified.json — HashMap<account_id, last_verified_epoch>
-///   manual_accounts.json  — Vec<ManualAccount>
-///   balance_history/
-///     {account_id}.json   — Vec<BalanceSnapshot>
-/// ```
-pub struct JsonStorage {
-    root: PathBuf,
+/// The [`FileStore`] `JsonStorage` uses when none is named: disk natively,
+/// memory in the browser (wasm32), where there is no filesystem.
+#[cfg(not(target_arch = "wasm32"))]
+pub type DefaultFileStore = DiskFiles;
+/// The [`FileStore`] `JsonStorage` uses when none is named: disk natively,
+/// memory in the browser (wasm32), where there is no filesystem.
+#[cfg(target_arch = "wasm32")]
+pub type DefaultFileStore = super::file_store::MemoryFiles;
+
+const ORGS_FILE: &str = "organizations.json";
+const ACCOUNTS_FILE: &str = "accounts.json";
+const STATE_FILE: &str = "state.json";
+const BALANCE_VERIFIED_FILE: &str = "balance_verified.json";
+const MANUAL_ACCOUNTS_FILE: &str = "manual_accounts.json";
+const CONFIG_FILE: &str = "config.json";
+const WARNINGS_FILE: &str = "warnings.json";
+const SPENDING_PATTERNS_FILE: &str = "spending_patterns.json";
+const TRANSACTION_EDITS_FILE: &str = "transaction_edits.json";
+const TRANSACTIONS_DIR: &str = "transactions";
+const BALANCE_HISTORY_DIR: &str = "balance_history";
+const JSON_EXT: &str = ".json";
+
+/// Path of an account's `{id}.json` file in `dir`.
+fn account_file(dir: &str, account_id: &str) -> String {
+    format!("{dir}/{account_id}{JSON_EXT}")
 }
 
-impl JsonStorage {
+fn transactions_path(account_id: &str) -> String {
+    account_file(TRANSACTIONS_DIR, account_id)
+}
+
+fn balance_history_path(account_id: &str) -> String {
+    account_file(BALANCE_HISTORY_DIR, account_id)
+}
+
+/// JSON-file-based storage backend over a [`FileStore`].
+///
+/// File layout (relative to the store root):
+/// ```text
+/// organizations.json    — Vec<Organization>
+/// accounts.json         — Vec<Account> (transactions always empty)
+/// transactions/
+///   {account_id}.json   — Vec<Transaction>
+/// state.json            — HashMap<account_id, last_collected_epoch>
+/// balance_verified.json — HashMap<account_id, last_verified_epoch>
+/// manual_accounts.json  — Vec<ManualAccount>
+/// balance_history/
+///   {account_id}.json   — Vec<BalanceSnapshot>
+/// transaction_edits.json — TransactionEdits (user overlay, never rewritten by collection)
+/// ```
+pub struct JsonStorage<F: FileStore = DefaultFileStore> {
+    files: F,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl JsonStorage<DiskFiles> {
     /// Opens or creates a JSON storage directory at the given path.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|e| SimplefinError::Storage {
-            message: format!("failed to create storage directory: {}", root.display()),
-            source: Some(Box::new(e)),
-        })?;
-        fs::create_dir_all(root.join("transactions")).map_err(|e| SimplefinError::Storage {
-            message: "failed to create transactions directory".into(),
-            source: Some(Box::new(e)),
-        })?;
-        fs::create_dir_all(root.join("balance_history")).map_err(|e| SimplefinError::Storage {
-            message: "failed to create balance_history directory".into(),
-            source: Some(Box::new(e)),
-        })?;
-        Ok(JsonStorage { root })
+    pub fn open(root: impl AsRef<std::path::Path>) -> Result<Self> {
+        let files = DiskFiles::new(root.as_ref());
+        files.create_dir("")?;
+        files.create_dir(TRANSACTIONS_DIR)?;
+        files.create_dir(BALANCE_HISTORY_DIR)?;
+        Self::with_files(files)
+    }
+}
+
+impl<F: FileStore> JsonStorage<F> {
+    /// Storage over an arbitrary [`FileStore`] (e.g. `MemoryFiles`).
+    pub fn with_files(files: F) -> Result<Self> {
+        Ok(JsonStorage { files })
     }
 
-    fn orgs_path(&self) -> PathBuf {
-        self.root.join("organizations.json")
+    /// Parses the file at `path`, or None when it is absent.
+    fn read_json_opt<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Option<T>> {
+        let Some(data) = self.files.read(path)? else {
+            return Ok(None);
+        };
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|e| SimplefinError::Storage {
+                message: format!("failed to parse {path}"),
+                source: Some(Box::new(e)),
+            })
     }
 
-    fn accounts_path(&self) -> PathBuf {
-        self.root.join("accounts.json")
+    fn read_json<T: serde::de::DeserializeOwned + Default>(&self, path: &str) -> Result<T> {
+        Ok(self.read_json_opt(path)?.unwrap_or_default())
     }
 
-    fn transactions_path(&self, account_id: &str) -> PathBuf {
-        self.root
-            .join("transactions")
-            .join(format!("{account_id}.json"))
-    }
-
-    fn state_path(&self) -> PathBuf {
-        self.root.join("state.json")
-    }
-
-    fn balance_verified_path(&self) -> PathBuf {
-        self.root.join("balance_verified.json")
-    }
-
-    fn manual_accounts_path(&self) -> PathBuf {
-        self.root.join("manual_accounts.json")
-    }
-
-    fn balance_history_path(&self, account_id: &str) -> PathBuf {
-        self.root
-            .join("balance_history")
-            .join(format!("{account_id}.json"))
-    }
-
-    fn config_path(&self) -> PathBuf {
-        self.root.join("config.json")
-    }
-
-    fn warnings_path(&self) -> PathBuf {
-        self.root.join("warnings.json")
-    }
-
-    fn spending_patterns_path(&self) -> PathBuf {
-        self.root.join("spending_patterns.json")
-    }
-
-    fn read_json<T: serde::de::DeserializeOwned + Default>(&self, path: &Path) -> Result<T> {
-        if !path.exists() {
-            return Ok(T::default());
-        }
-        let data = fs::read_to_string(path).map_err(|e| SimplefinError::Storage {
-            message: format!("failed to read {}", path.display()),
-            source: Some(Box::new(e)),
-        })?;
-        serde_json::from_str(&data).map_err(|e| SimplefinError::Storage {
-            message: format!("failed to parse {}", path.display()),
-            source: Some(Box::new(e)),
-        })
-    }
-
-    fn write_json<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<()> {
-        let tmp = path.with_extension("json.tmp");
+    fn write_json<T: serde::Serialize>(&self, path: &str, value: &T) -> Result<()> {
         let data = serde_json::to_string_pretty(value).map_err(|e| SimplefinError::Storage {
             message: "failed to serialize data".into(),
             source: Some(Box::new(e)),
         })?;
-        fs::write(&tmp, &data).map_err(|e| SimplefinError::Storage {
-            message: format!("failed to write {}", tmp.display()),
-            source: Some(Box::new(e)),
-        })?;
-        fs::rename(&tmp, path).map_err(|e| SimplefinError::Storage {
-            message: format!("failed to rename {} to {}", tmp.display(), path.display()),
-            source: Some(Box::new(e)),
-        })?;
-        Ok(())
+        self.files.write(path, &data)
+    }
+
+    /// Account IDs that have a `{id}.json` file in `dir`.
+    fn ids_in(&self, dir: &str) -> Result<Vec<String>> {
+        Ok(self
+            .files
+            .list(dir)?
+            .into_iter()
+            .filter_map(|name| name.strip_suffix(JSON_EXT).map(str::to_string))
+            .filter(|id| !id.is_empty())
+            .collect())
     }
 
     fn read_state(&self) -> Result<HashMap<String, i64>> {
-        self.read_json(&self.state_path())
+        self.read_json(STATE_FILE)
     }
 
     fn write_state(&self, state: &HashMap<String, i64>) -> Result<()> {
-        self.write_json(&self.state_path(), state)
+        self.write_json(STATE_FILE, state)
     }
 
     /// When a balance was last verified per account. Distinct from the latest
@@ -139,23 +135,23 @@ impl JsonStorage {
     /// as of this time"): re-confirming an unchanged value advances verification
     /// without appending a duplicate snapshot or disturbing historical truth.
     fn read_balance_verified(&self) -> Result<HashMap<String, i64>> {
-        self.read_json(&self.balance_verified_path())
+        self.read_json(BALANCE_VERIFIED_FILE)
     }
 
     fn write_balance_verified(&self, verified: &HashMap<String, i64>) -> Result<()> {
-        self.write_json(&self.balance_verified_path(), verified)
+        self.write_json(BALANCE_VERIFIED_FILE, verified)
     }
 
     fn load_accounts(&self) -> Result<Vec<Account>> {
-        self.read_json(&self.accounts_path())
+        self.read_json(ACCOUNTS_FILE)
     }
 
     fn load_orgs(&self) -> Result<Vec<Organization>> {
-        self.read_json(&self.orgs_path())
+        self.read_json(ORGS_FILE)
     }
 }
 
-impl Storage for JsonStorage {
+impl<F: FileStore> Storage for JsonStorage<F> {
     fn upsert_organizations(&mut self, orgs: &[Organization]) -> Result<()> {
         let mut existing: Vec<Organization> = self.load_orgs()?;
         for org in orgs {
@@ -166,7 +162,7 @@ impl Storage for JsonStorage {
                 existing.push(org.clone());
             }
         }
-        self.write_json(&self.orgs_path(), &existing)
+        self.write_json(ORGS_FILE, &existing)
     }
 
     fn upsert_accounts(&mut self, accounts: &[Account]) -> Result<()> {
@@ -180,11 +176,11 @@ impl Storage for JsonStorage {
                 existing.push(stored);
             }
         }
-        self.write_json(&self.accounts_path(), &existing)
+        self.write_json(ACCOUNTS_FILE, &existing)
     }
 
     fn upsert_transactions(&mut self, account_id: &str, txns: &[Transaction]) -> Result<usize> {
-        let path = self.transactions_path(account_id);
+        let path = transactions_path(account_id);
         let mut existing: Vec<Transaction> = self.read_json(&path)?;
         let mut new_count = 0;
         for txn in txns {
@@ -289,7 +285,7 @@ impl Storage for JsonStorage {
 
         let mut results = Vec::new();
         for (account_id, account_name, org_name, currency) in targets {
-            let path = self.transactions_path(&account_id);
+            let path = transactions_path(&account_id);
             let txns: Vec<Transaction> = self.read_json(&path)?;
             for txn in txns {
                 if let Some(start) = filter.start_date
@@ -320,6 +316,8 @@ impl Storage for JsonStorage {
                     description: txn.description,
                     transacted_at: txn.transacted_at,
                     pending: txn.pending,
+                    payee: txn.payee,
+                    memo: txn.memo,
                 });
             }
         }
@@ -339,14 +337,13 @@ impl Storage for JsonStorage {
     }
 
     fn max_stored_posted(&self, account_id: &str) -> Result<Option<i64>> {
-        let path = self.transactions_path(account_id);
+        let path = transactions_path(account_id);
         let txns: Vec<Transaction> = self.read_json(&path)?;
         Ok(txns.iter().filter(|t| t.posted > 0).map(|t| t.posted).max())
     }
 
     fn upsert_manual_accounts(&mut self, accounts: &[ManualAccount]) -> Result<()> {
-        let path = self.manual_accounts_path();
-        let mut existing: Vec<ManualAccount> = self.read_json(&path)?;
+        let mut existing: Vec<ManualAccount> = self.read_json(MANUAL_ACCOUNTS_FILE)?;
         for account in accounts {
             if let Some(pos) = existing.iter().position(|a| a.id == account.id) {
                 existing[pos] = account.clone();
@@ -354,11 +351,11 @@ impl Storage for JsonStorage {
                 existing.push(account.clone());
             }
         }
-        self.write_json(&path, &existing)
+        self.write_json(MANUAL_ACCOUNTS_FILE, &existing)
     }
 
     fn get_manual_accounts(&self) -> Result<Vec<ManualAccount>> {
-        self.read_json(&self.manual_accounts_path())
+        self.read_json(MANUAL_ACCOUNTS_FILE)
     }
 
     fn record_balance(&mut self, account_id: &str, timestamp: i64, balance: Decimal) -> Result<()> {
@@ -371,7 +368,7 @@ impl Storage for JsonStorage {
         }
         self.write_balance_verified(&verified)?;
 
-        let path = self.balance_history_path(account_id);
+        let path = balance_history_path(account_id);
         let mut history: Vec<BalanceSnapshot> = self.read_json(&path)?;
 
         // Skip appending a duplicate when the most recent snapshot has the same
@@ -392,11 +389,11 @@ impl Storage for JsonStorage {
     }
 
     fn get_config(&self) -> Result<DataConfig> {
-        self.read_json(&self.config_path())
+        self.read_json(CONFIG_FILE)
     }
 
     fn set_config(&self, config: &DataConfig) -> Result<()> {
-        self.write_json(&self.config_path(), config)
+        self.write_json(CONFIG_FILE, config)
     }
 
     fn get_stale_accounts(&self, now: i64) -> Result<Vec<StaleAccount>> {
@@ -449,52 +446,16 @@ impl Storage for JsonStorage {
             .collect();
 
         let mut orphans = Vec::new();
-
-        // Check balance_history/ directory
-        let bh_dir = self.root.join("balance_history");
-        if bh_dir.exists() {
-            for entry in fs::read_dir(&bh_dir).map_err(|e| SimplefinError::Storage {
-                message: "failed to read balance_history directory".into(),
-                source: Some(Box::new(e)),
-            })? {
-                let entry = entry.map_err(|e| SimplefinError::Storage {
-                    message: "failed to read directory entry".into(),
-                    source: Some(Box::new(e)),
-                })?;
-                let path = entry.path();
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                    && path.extension().is_some_and(|ext| ext == "json")
-                    && !known_ids.contains(stem)
-                {
+        for (data_type, dir) in [
+            (OrphanedDataType::BalanceHistory, BALANCE_HISTORY_DIR),
+            (OrphanedDataType::Transactions, TRANSACTIONS_DIR),
+        ] {
+            for id in self.ids_in(dir)? {
+                if !known_ids.contains(id.as_str()) {
                     orphans.push(OrphanedData {
-                        account_id: stem.to_string(),
-                        data_type: OrphanedDataType::BalanceHistory,
-                        path: path.to_string_lossy().to_string(),
-                    });
-                }
-            }
-        }
-
-        // Check transactions/ directory
-        let txn_dir = self.root.join("transactions");
-        if txn_dir.exists() {
-            for entry in fs::read_dir(&txn_dir).map_err(|e| SimplefinError::Storage {
-                message: "failed to read transactions directory".into(),
-                source: Some(Box::new(e)),
-            })? {
-                let entry = entry.map_err(|e| SimplefinError::Storage {
-                    message: "failed to read directory entry".into(),
-                    source: Some(Box::new(e)),
-                })?;
-                let path = entry.path();
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                    && path.extension().is_some_and(|ext| ext == "json")
-                    && !known_ids.contains(stem)
-                {
-                    orphans.push(OrphanedData {
-                        account_id: stem.to_string(),
-                        data_type: OrphanedDataType::Transactions,
-                        path: path.to_string_lossy().to_string(),
+                        path: account_file(dir, &id),
+                        account_id: id,
+                        data_type: data_type.clone(),
                     });
                 }
             }
@@ -505,86 +466,57 @@ impl Storage for JsonStorage {
 
     fn remove_orphaned_data(&self, orphans: &[OrphanedData]) -> Result<()> {
         for orphan in orphans {
-            let path = Path::new(&orphan.path);
-            if path.exists() {
-                fs::remove_file(path).map_err(|e| SimplefinError::Storage {
-                    message: format!("failed to remove orphaned file: {}", orphan.path),
-                    source: Some(Box::new(e)),
-                })?;
-            }
+            self.files.remove(&orphan.path)?;
         }
         Ok(())
     }
 
     fn save_warnings(&self, record: &WarningRecord) -> Result<()> {
-        self.write_json(&self.warnings_path(), record)
+        self.write_json(WARNINGS_FILE, record)
     }
 
     fn get_warnings(&self) -> Result<Option<WarningRecord>> {
-        let path = self.warnings_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let data = fs::read_to_string(&path).map_err(|e| SimplefinError::Storage {
-            message: format!("failed to read {}", path.display()),
-            source: Some(Box::new(e)),
-        })?;
-        let record: WarningRecord =
-            serde_json::from_str(&data).map_err(|e| SimplefinError::Storage {
-                message: format!("failed to parse {}", path.display()),
-                source: Some(Box::new(e)),
-            })?;
-        Ok(Some(record))
+        self.read_json_opt(WARNINGS_FILE)
     }
 
     fn get_spending_patterns(&self) -> Result<Vec<crate::spending::SpendingRule>> {
-        let path = self.spending_patterns_path();
-        if !path.exists() {
-            // Seed with defaults on first use
-            let defaults = crate::spending::default_spending_patterns();
-            self.write_json(&path, &defaults)?;
-            return Ok(defaults);
+        if let Some(patterns) = self.read_json_opt(SPENDING_PATTERNS_FILE)? {
+            return Ok(patterns);
         }
-        self.read_json(&path)
+        // Seed with defaults on first use
+        let defaults = crate::spending::default_spending_patterns();
+        self.write_json(SPENDING_PATTERNS_FILE, &defaults)?;
+        Ok(defaults)
     }
 
     fn set_spending_patterns(&self, patterns: &[crate::spending::SpendingRule]) -> Result<()> {
-        self.write_json(&self.spending_patterns_path(), &patterns)
+        self.write_json(SPENDING_PATTERNS_FILE, &patterns)
+    }
+
+    fn get_transaction_edits(&self) -> Result<crate::edits::TransactionEdits> {
+        self.read_json(TRANSACTION_EDITS_FILE)
+    }
+
+    fn set_transaction_edits(&self, edits: &crate::edits::TransactionEdits) -> Result<()> {
+        self.write_json(TRANSACTION_EDITS_FILE, edits)
     }
 
     fn get_balance_history(&self, filter: &BalanceHistoryFilter) -> Result<Vec<BalanceSnapshot>> {
-        if let Some(ref account_id) = filter.account_id {
-            // Single account
-            let path = self.balance_history_path(account_id);
-            let history: Vec<BalanceSnapshot> = self.read_json(&path)?;
-            Ok(Self::filter_snapshots(history, filter))
-        } else {
-            // All accounts — read all files in balance_history/
-            let dir = self.root.join("balance_history");
-            let mut all = Vec::new();
-            if dir.exists() {
-                for entry in fs::read_dir(&dir).map_err(|e| SimplefinError::Storage {
-                    message: "failed to read balance_history directory".into(),
-                    source: Some(Box::new(e)),
-                })? {
-                    let entry = entry.map_err(|e| SimplefinError::Storage {
-                        message: "failed to read directory entry".into(),
-                        source: Some(Box::new(e)),
-                    })?;
-                    let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "json") {
-                        let snapshots: Vec<BalanceSnapshot> = self.read_json(&path)?;
-                        all.extend(snapshots);
-                    }
-                }
-            }
-            all.sort_by_key(|s| s.timestamp);
-            Ok(Self::filter_snapshots(all, filter))
+        let ids = match filter.account_id {
+            Some(ref account_id) => vec![account_id.clone()],
+            None => self.ids_in(BALANCE_HISTORY_DIR)?,
+        };
+        let mut all = Vec::new();
+        for id in ids {
+            let snapshots: Vec<BalanceSnapshot> = self.read_json(&balance_history_path(&id))?;
+            all.extend(snapshots);
         }
+        all.sort_by_key(|s| s.timestamp);
+        Ok(Self::filter_snapshots(all, filter))
     }
 }
 
-impl JsonStorage {
+impl<F: FileStore> JsonStorage<F> {
     fn filter_snapshots(
         snapshots: Vec<BalanceSnapshot>,
         filter: &BalanceHistoryFilter,

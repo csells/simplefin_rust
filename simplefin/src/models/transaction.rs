@@ -7,7 +7,7 @@ use crate::datetime_utils::{epoch_to_datetime, to_iso8601};
 use super::serde_helpers::{deserialize_decimal, deserialize_pending};
 
 /// Immutable view of a transaction within a SimpleFIN account.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transaction {
     /// Identifier for the transaction.
     pub id: String,
@@ -29,6 +29,14 @@ pub struct Transaction {
     /// Indicates whether the transaction is still pending.
     #[serde(default, deserialize_with = "deserialize_pending")]
     pub pending: bool,
+
+    /// Payee or merchant name, when the provider supplies one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payee: Option<String>,
+
+    /// Provider-supplied memo, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
 }
 
 impl Transaction {

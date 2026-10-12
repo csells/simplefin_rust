@@ -1,3 +1,17 @@
 [workspace]
-members = ["simplefin", "simplefin-cli"]
+members = ["simplefin", "simplefin-cli", "simplefin-app"]
 resolver = "3"
+
+# Ely's upstream Cargo.toml pulls GPUI's desktop platform crate on every target, which
+# has no Android/iOS backend. Until that change is accepted upstream, build Ely from a
+# sibling checkout of its `simplefin-android` branch (see simplefin-app/README.md).
+[patch."https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components"]
+ely-gpui-component = { path = "../../ZacharyZhang-NY/Ely-GPUI-Components" }
+
+# The browser build: small over fast (the wasm downloads to a phone).
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
